@@ -1,0 +1,104 @@
+{
+  "user_id": "user_DE_001",
+  "generated_at": "2026-04-15T12:33:14.699455",
+  "summary": {
+    "total_courses": 2,
+    "total_duration_weeks": 16,
+    "total_cost_sgd": 5400.0,
+    "total_cost_after_subsidy_sgd": 1840.0,
+    "total_savings_sgd": 3560.0,
+    "subsidy_rate": 0.6592592592592592
+  },
+  "cbr_insight": "No similar historical profiles found.",
+  "trade_offs": [],
+  "recommended_courses": [
+    {
+      "rank": 1,
+      "sequence_position": "Month 1-3",
+      "course": {
+        "course_id": "SF-SPARK-001",
+        "title": "Apache Spark for Big Data Processing",
+        "provider": "Singapore Polytechnic",
+        "duration_weeks": 10,
+        "cost_sgd": 3200.0,
+        "cost_after_subsidy_sgd": 960.0000000000001,
+        "subsidy_rate": 0.7,
+        "savings_sgd": 2240.0,
+        "modality": "online",
+        "schedule": "weekend",
+        "skills_covered": [
+          "apache spark",
+          "pyspark",
+          "big data"
+        ],
+        "prerequisites": [],
+        "rating": 4.7,
+        "enrollment_count": 980,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6648027734976887,
+        "score_breakdown": {
+          "relevance": 0.3220338983050847,
+          "rating": 0.9400000000000001,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.8909090909090909
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.3220338983050847,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 2,
+      "sequence_position": "Month 3-4",
+      "course": {
+        "course_id": "SF-ETL-003",
+        "title": "ETL Pipeline Design and Development",
+        "provider": "Coursera",
+        "duration_weeks": 6,
+        "cost_sgd": 2200.0,
+        "cost_after_subsidy_sgd": 880.0,
+        "subsidy_rate": 0.6,
+        "savings_sgd": 1320.0,
+        "modality": "online",
+        "schedule": "flexible",
+        "skills_covered": [
+          "etl pipelines",
+          "data integration",
+          "apache spark"
+        ],
+        "prerequisites": [
+          "SF-SPARK-001"
+        ],
+        "rating": 4.5,
+        "enrollment_count": 620,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6463918849512069,
+        "score_breakdown": {
+          "relevance": 0.5762711864406779,
+          "rating": 0.9,
+          "constraint_fit": 0.6666666666666666,
+          "cbr_similarity": 0.5,
+          "popularity": 0.5636363636363636
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.5762711864406779,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    }
+  ]
+}

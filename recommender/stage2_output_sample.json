@@ -1,0 +1,97 @@
+{
+  "skill_gaps": {
+    "target_role": "Machine Learning Engineer",
+    "total_gaps": 5,
+    "gaps": [
+      {
+        "skill": "deep learning",
+        "category": "Technical",
+        "gap_weight": 0.75,
+        "user_skill_proficiency": 0.25,
+        "demand_score": 0.85,
+        "peer_score": 0.88,
+        "graph_distance": 2,
+        "priority": "critical",
+        "rationale": "Required in 85% of ML Engineer postings; present in 88% of peer CVs. Core competency for modern ML roles."
+      },
+      {
+        "skill": "tensorflow",
+        "category": "Technical",
+        "gap_weight": 0.68,
+        "user_skill_proficiency": 0.15,
+        "demand_score": 0.78,
+        "peer_score": 0.82,
+        "graph_distance": 3,
+        "priority": "high",
+        "rationale": "Required in 78% of postings; present in 82% of peer CVs. Industry-standard framework."
+      },
+      {
+        "skill": "mlops",
+        "category": "Technical",
+        "gap_weight": 0.62,
+        "user_skill_proficiency": 0.1,
+        "demand_score": 0.72,
+        "peer_score": 0.75,
+        "graph_distance": 4,
+        "priority": "high",
+        "rationale": "Growing demand for production ML deployment expertise."
+      },
+      {
+        "skill": "computer vision",
+        "category": "Technical",
+        "gap_weight": 0.55,
+        "user_skill_proficiency": 0.2,
+        "demand_score": 0.65,
+        "peer_score": 0.68,
+        "graph_distance": 3,
+        "priority": "medium",
+        "rationale": "Required in 65% of postings; specialized skill for CV roles."
+      },
+      {
+        "skill": "natural language processing",
+        "category": "Technical",
+        "gap_weight": 0.5,
+        "user_skill_proficiency": 0.18,
+        "demand_score": 0.62,
+        "peer_score": 0.65,
+        "graph_distance": 3,
+        "priority": "medium",
+        "rationale": "Required in 62% of postings; specialized skill for NLP roles."
+      }
+    ],
+    "candidate_courses": [
+      {
+        "course_id": "SF-DL-001",
+        "covers_skills": [
+          "deep learning",
+          "tensorflow"
+        ],
+        "pre_constraint": true
+      },
+      {
+        "course_id": "SF-CV-002",
+        "covers_skills": [
+          "computer vision",
+          "deep learning"
+        ],
+        "pre_constraint": true
+      },
+      {
+        "course_id": "SF-NLP-003",
+        "covers_skills": [
+          "natural language processing",
+          "tensorflow"
+        ],
+        "pre_constraint": true
+      },
+      {
+        "course_id": "SF-MLOPS-004",
+        "covers_skills": [
+          "mlops",
+          "tensorflow"
+        ],
+        "pre_constraint": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "id": "example_id", # can be added by python script
+  "title": "exmaple_title", # not needed if already in dataset
+  "category": "example_category",
+  "description": "example_description", # not needed if already in dataset
+  "skills": ["skill1", "skill2"]
+}

@@ -1,0 +1,446 @@
+# Singapore IT Job Analysis - Python Arrays
+# Generated from Singapore_IT_Job_Analysis_v2.xlsx
+
+# Install required package if not available
+import subprocess
+import sys
+try:
+    import networkx
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "networkx"])
+
+# Array 1: Job roles with their associated skills and category
+test_job_roles_list = [
+    {"role": "AI Engineer", "category": "Artificial Intelligence & Data Science", "skills": ["Python", "PyTorch", "TensorFlow", "MLOps", "Generative AI"]},
+    {"role": "ML Engineer", "category": "Artificial Intelligence & Data Science", "skills": ["Python", "PyTorch", "Algorithms", "MLOps", "Generative AI"]},
+    {"role": "Generative AI Developer", "category": "Artificial Intelligence & Data Science", "skills": ["LLMs", "RAG", "Prompt Engineering", "LangChain", "Vector Databases"]},
+    {"role": "Data Scientist", "category": "Artificial Intelligence & Data Science", "skills": ["Python", "R", "Statistics", "Tableau", "SQL"]},
+    {"role": "Data Engineer", "category": "Artificial Intelligence & Data Science", "skills": ["SQL", "Spark", "Kafka", "Airflow", "ETL Pipelines"]},
+    {"role": "AI Solutions Architect", "category": "Artificial Intelligence & Data Science", "skills": ["System Design", "Cloud AI Services", "API Integration", "Scalability"]},
+    {"role": "MLOps Engineer", "category": "Artificial Intelligence & Data Science", "skills": ["Docker", "Kubernetes", "CI/CD", "Model Monitoring", "Cloud Computing"]},
+    {"role": "Data Analyst", "category": "Artificial Intelligence & Data Science", "skills": ["Excel", "Power BI", "SQL", "Python", "Data Storytelling"]},
+    {"role": "AI Ethics & Governance Specialist", "category": "Artificial Intelligence & Data Science", "skills": ["Compliance", "Data Privacy", "Risk Assessment", "Policy Writing"]},
+    {"role": "Computer Vision Engineer", "category": "Artificial Intelligence & Data Science", "skills": ["OpenCV", "Deep Learning", "Image Processing", "C++", "Python"]},
+    {"role": "NLP Specialist", "category": "Artificial Intelligence & Data Science", "skills": ["Transformers", "BERT/GPT", "Tokenization", "Linguistics", "Python"]},
+    {"role": "Full-Stack Developer", "category": "Software Development & Engineering", "skills": ["JavaScript", "React", "Node.js", "SQL", "MongoDB"]},
+    {"role": "Backend Engineer", "category": "Software Development & Engineering", "skills": ["Java", "Go", "Python", "Microservices", "API Design"]},
+    {"role": "Frontend Developer", "category": "Software Development & Engineering", "skills": ["HTML/CSS", "React", "Vue", "TypeScript", "Web Performance"]},
+    {"role": "Mobile App Developer", "category": "Software Development & Engineering", "skills": ["Swift", "Kotlin", "Flutter", "React Native", "Mobile UX"]},
+    {"role": "Game Developer", "category": "Software Development & Engineering", "skills": ["Unity", "Unreal Engine", "C#", "C++", "3D Mathematics"]},
+    {"role": "Embedded Systems Engineer", "category": "Software Development & Engineering", "skills": ["C", "C++", "RTOS", "Microcontrollers", "Firmware"]},
+    {"role": "C++ Software Engineer", "category": "Software Development & Engineering", "skills": ["C++", "Multithreading", "Low Latency", "Systems Programming"]},
+    {"role": "Application Architect", "category": "Software Development & Engineering", "skills": ["Distributed Systems", "Microservices", "Security", "Design Patterns"]},
+    {"role": "QA Automation Engineer", "category": "Software Development & Engineering", "skills": ["Selenium", "Cypress", "Jenkins", "Test Planning", "Scripting"]},
+    {"role": "DevOps Engineer", "category": "Software Development & Engineering", "skills": ["Terraform", "Ansible", "Kubernetes", "CI/CD", "Scripting"]},
+    {"role": "Cybersecurity Engineer", "category": "Cybersecurity & Risk", "skills": ["Network Security", "Firewalls", "Python", "Threat Intelligence"]},
+    {"role": "Security Architect", "category": "Cybersecurity & Risk", "skills": ["Security Frameworks", "Zero Trust", "Risk Management", "IAM"]},
+    {"role": "Incident Response Specialist", "category": "Cybersecurity & Risk", "skills": ["Forensics", "Threat Hunting", "SIEM", "Malware Analysis"]},
+    {"role": "Cloud Security Specialist", "category": "Cybersecurity & Risk", "skills": ["AWS Security", "Azure Security", "Identity Management", "Encryption", "Compliance"]},
+    {"role": "Penetration Tester", "category": "Cybersecurity & Risk", "skills": ["Metasploit", "Burp Suite", "Network Auditing", "Vulnerability Assessment"]},
+    {"role": "IT Risk & Compliance Manager", "category": "Cybersecurity & Risk", "skills": ["MAS TRM Guidelines", "ISO 27001", "PDPA", "Audit"]},
+    {"role": "IAM Engineer", "category": "Cybersecurity & Risk", "skills": ["Okta", "Azure AD", "OAuth", "SAML", "Authentication"]},
+    {"role": "Cybersecurity Risk Analyst", "category": "Cybersecurity & Risk", "skills": ["GRC", "Quantitative Risk", "Threat Modeling", "Compliance"]},
+    {"role": "SOC Analyst", "category": "Cybersecurity & Risk", "skills": ["Log Analysis", "SIEM", "Incident Categorization", "Communication"]},
+    {"role": "DevSecOps Engineer", "category": "Cybersecurity & Risk", "skills": ["Security Automation", "SAST/DAST", "Container Security", "CI/CD"]},
+    {"role": "Cloud Architect", "category": "Cloud, Infrastructure & Networking", "skills": ["AWS", "Azure", "GCP", "Solution Architecture", "Cost Management"]},
+    {"role": "Site Reliability Engineer (SRE)", "category": "Cloud, Infrastructure & Networking", "skills": ["Observability", "Automation", "Incident Management", "Python"]},
+    {"role": "Platform Engineer", "category": "Cloud, Infrastructure & Networking", "skills": ["Internal Developer Platforms", "Kubernetes", "Infrastructure as Code"]},
+    {"role": "Cloud Migration Specialist", "category": "Cloud, Infrastructure & Networking", "skills": ["Lift and Shift", "Refactoring", "Database Migration", "Strategy"]},
+    {"role": "Network Engineer", "category": "Cloud, Infrastructure & Networking", "skills": ["Cisco", "Juniper", "SDN", "Routing/Switching", "Wireless"]},
+    {"role": "Systems Administrator", "category": "Cloud, Infrastructure & Networking", "skills": ["Linux Server", "Windows Server", "Virtualization", "Active Directory", "Shell"]},
+    {"role": "Infrastructure Architect", "category": "Cloud, Infrastructure & Networking", "skills": ["Hardware", "Storage", "Networking", "Virtualization", "Hybrid Cloud"]},
+    {"role": "FinOps Specialist", "category": "Cloud, Infrastructure & Networking", "skills": ["Cloud Billing", "Cost Optimization", "Tagging Strategy", "Reporting"]},
+    {"role": "Virtualization Engineer", "category": "Cloud, Infrastructure & Networking", "skills": ["VMware", "Hyper-V", "KVM", "SDN", "Storage Networking"]},
+    {"role": "Data Center Operations Engineer", "category": "Cloud, Infrastructure & Networking", "skills": ["Cooling", "Power Systems", "Rack Management", "Physical Security"]},
+    {"role": "IT Project Manager", "category": "Product, Strategy & Project Management", "skills": ["Agile", "Scrum", "Stakeholder Management", "JIRA", "Budgeting"]},
+    {"role": "Product Manager (Technical)", "category": "Product, Strategy & Project Management", "skills": ["Roadmapping", "Requirements", "User Research", "API Specs", "Technical Specs"]},
+    {"role": "Business Systems Analyst", "category": "Product, Strategy & Project Management", "skills": ["Requirements Gathering", "SQL", "Process Mapping", "User Stories"]},
+    {"role": "Techno-Functional Consultant", "category": "Product, Strategy & Project Management", "skills": ["ERP", "CRM", "SAP", "Salesforce", "Business Process", "Integration"]},
+    {"role": "UX/UI Designer", "category": "Product, Strategy & Project Management", "skills": ["Figma", "User Research", "Wireframing", "Accessibility", "Prototyping"]},
+    {"role": "Digital Transformation Lead", "category": "Product, Strategy & Project Management", "skills": ["Change Management", "Strategy", "Stakeholder Influence", "ROI Analysis"]},
+    {"role": "IT Service Delivery Manager", "category": "Product, Strategy & Project Management", "skills": ["ITIL", "SLA Management", "Incident Management", "Problem Management", "Vendor Mgmt"]},
+    {"role": "ERP Business Analyst", "category": "Product, Strategy & Project Management", "skills": ["SAP S/4HANA", "Finance Logic", "Supply Chain Logic", "Configuration"]},
+    {"role": "Solution Consultant (Pre-sales)", "category": "Product, Strategy & Project Management", "skills": ["Technical Presentations", "Proof of Concept", "Product Demo", "RFP"]},
+    {"role": "Blockchain/Web3 Developer", "category": "Product, Strategy & Project Management", "skills": ["Solidity", "Smart Contracts", "Ethereum", "Cryptography", "Web3.js"]},
+    {"role": "AI/ML Developer", "category": "Product, Strategy & Project Management", "skills": ["AI Frameworks", "Reasoning Systems", "Random Forest", "Search algorithms", "Agentic systems"]},
+]
+
+
+# Array 2: All skills with their frequency across the top 50 roles
+test_skills_list = [
+    {"skill": "Python", "frequency": 8},
+    {"skill": "SQL", "frequency": 5},
+    {"skill": "C++", "frequency": 4},
+    {"skill": "Compliance", "frequency": 3},
+    {"skill": "CI/CD", "frequency": 3},
+    {"skill": "Kubernetes", "frequency": 3},
+    {"skill": "Strategy", "frequency": 2},
+    {"skill": "SDN", "frequency": 2},
+    {"skill": "Incident Management", "frequency": 2},
+    {"skill": "Virtualization", "frequency": 2},
+    {"skill": "User Research", "frequency": 2},
+    {"skill": "React", "frequency": 2},
+    {"skill": "SIEM", "frequency": 2},
+    {"skill": "Scripting", "frequency": 2},
+    {"skill": "Microservices", "frequency": 2},
+    {"skill": "Cloud Billing", "frequency": 1},
+    {"skill": "VMware", "frequency": 1},
+    {"skill": "Reporting", "frequency": 1},
+    {"skill": "Juniper", "frequency": 1},
+    {"skill": "Tagging Strategy", "frequency": 1},
+    {"skill": "Routing/Switching", "frequency": 1},
+    {"skill": "Wireless", "frequency": 1},
+    {"skill": "Cost Optimization", "frequency": 1},
+    {"skill": "Shell", "frequency": 1},
+    {"skill": "Hardware", "frequency": 1},
+    {"skill": "Linux Server", "frequency": 1},
+    {"skill": "Windows Server", "frequency": 1},
+    {"skill": "Networking", "frequency": 1},
+    {"skill": "Storage", "frequency": 1},
+    {"skill": "Cisco", "frequency": 1},
+    {"skill": "Active Directory", "frequency": 1},
+    {"skill": "Hybrid Cloud", "frequency": 1},
+    {"skill": "Database Migration", "frequency": 1},
+    {"skill": "KVM", "frequency": 1},
+    {"skill": "Container Security", "frequency": 1},
+    {"skill": "Authentication", "frequency": 1},
+    {"skill": "GRC", "frequency": 1},
+    {"skill": "Quantitative Risk", "frequency": 1},
+    {"skill": "Threat Modeling", "frequency": 1},
+    {"skill": "Log Analysis", "frequency": 1},
+    {"skill": "Incident Categorization", "frequency": 1},
+    {"skill": "Communication", "frequency": 1},
+    {"skill": "Security Automation", "frequency": 1},
+    {"skill": "SAST/DAST", "frequency": 1},
+    {"skill": "AWS", "frequency": 1},
+    {"skill": "Refactoring", "frequency": 1},
+    {"skill": "Azure", "frequency": 1},
+    {"skill": "GCP", "frequency": 1},
+    {"skill": "Solution Architecture", "frequency": 1},
+    {"skill": "Cost Management", "frequency": 1},
+    {"skill": "Observability", "frequency": 1},
+    {"skill": "Automation", "frequency": 1},
+    {"skill": "Internal Developer Platforms", "frequency": 1},
+    {"skill": "Infrastructure as Code", "frequency": 1},
+    {"skill": "Lift and Shift", "frequency": 1},
+    {"skill": "Hyper-V", "frequency": 1},
+    {"skill": "Rack Management", "frequency": 1},
+    {"skill": "Storage Networking", "frequency": 1},
+    {"skill": "Finance Logic", "frequency": 1},
+    {"skill": "Prototyping", "frequency": 1},
+    {"skill": "Change Management", "frequency": 1},
+    {"skill": "Stakeholder Influence", "frequency": 1},
+    {"skill": "ROI Analysis", "frequency": 1},
+    {"skill": "ITIL", "frequency": 1},
+    {"skill": "SLA Management", "frequency": 1},
+    {"skill": "Problem Management", "frequency": 1},
+    {"skill": "Vendor Mgmt", "frequency": 1},
+    {"skill": "SAP S/4HANA", "frequency": 1},
+    {"skill": "Supply Chain Logic", "frequency": 1},
+    {"skill": "Wireframing", "frequency": 1},
+    {"skill": "Configuration", "frequency": 1},
+    {"skill": "Technical Presentations", "frequency": 1},
+    {"skill": "Proof of Concept", "frequency": 1},
+    {"skill": "Product Demo", "frequency": 1},
+    {"skill": "RFP", "frequency": 1},
+    {"skill": "Solidity", "frequency": 1},
+    {"skill": "Smart Contracts", "frequency": 1},
+    {"skill": "Ethereum", "frequency": 1},
+    {"skill": "Cryptography", "frequency": 1},
+    {"skill": "Accessibility", "frequency": 1},
+    {"skill": "Figma", "frequency": 1},
+    {"skill": "Cooling", "frequency": 1},
+    {"skill": "Requirements", "frequency": 1},
+    {"skill": "Power Systems", "frequency": 1},
+    {"skill": "OAuth", "frequency": 1},
+    {"skill": "Physical Security", "frequency": 1},
+    {"skill": "Agile", "frequency": 1},
+    {"skill": "Scrum", "frequency": 1},
+    {"skill": "Stakeholder Management", "frequency": 1},
+    {"skill": "JIRA", "frequency": 1},
+    {"skill": "Budgeting", "frequency": 1},
+    {"skill": "Roadmapping", "frequency": 1},
+    {"skill": "API Specs", "frequency": 1},
+    {"skill": "Integration", "frequency": 1},
+    {"skill": "Technical Specs", "frequency": 1},
+    {"skill": "Requirements Gathering", "frequency": 1},
+    {"skill": "Process Mapping", "frequency": 1},
+    {"skill": "User Stories", "frequency": 1},
+    {"skill": "ERP", "frequency": 1},
+    {"skill": "CRM", "frequency": 1},
+    {"skill": "SAP", "frequency": 1},
+    {"skill": "Salesforce", "frequency": 1},
+    {"skill": "Business Process", "frequency": 1},
+    {"skill": "SAML", "frequency": 1},
+    {"skill": "ISO 27001", "frequency": 1},
+    {"skill": "Azure AD", "frequency": 1},
+    {"skill": "Tokenization", "frequency": 1},
+    {"skill": "Data Storytelling", "frequency": 1},
+    {"skill": "Data Privacy", "frequency": 1},
+    {"skill": "Risk Assessment", "frequency": 1},
+    {"skill": "Policy Writing", "frequency": 1},
+    {"skill": "OpenCV", "frequency": 1},
+    {"skill": "Deep Learning", "frequency": 1},
+    {"skill": "Image Processing", "frequency": 1},
+    {"skill": "Transformers", "frequency": 1},
+    {"skill": "BERT/GPT", "frequency": 1},
+    {"skill": "Linguistics", "frequency": 1},
+    {"skill": "Excel", "frequency": 1},
+    {"skill": "Java", "frequency": 1},
+    {"skill": "Power BI", "frequency": 1},
+    {"skill": "JavaScript", "frequency": 1},
+    {"skill": "Tableau", "frequency": 1},
+    {"skill": "Node.js", "frequency": 1},
+    {"skill": "MongoDB", "frequency": 1},
+    {"skill": "HTML/CSS", "frequency": 1},
+    {"skill": "Go", "frequency": 1},
+    {"skill": "API Design", "frequency": 1},
+    {"skill": "Vue", "frequency": 1},
+    {"skill": "TypeScript", "frequency": 1},
+    {"skill": "Web Performance", "frequency": 1},
+    {"skill": "Swift", "frequency": 1},
+    {"skill": "Statistics", "frequency": 1},
+    {"skill": "R", "frequency": 1},
+    {"skill": "Kotlin", "frequency": 1},
+    {"skill": "Flutter", "frequency": 1},
+    {"skill": "React Native", "frequency": 1},
+    {"skill": "Mobile UX", "frequency": 1},
+    {"skill": "Unity", "frequency": 1},
+    {"skill": "Unreal Engine", "frequency": 1},
+    {"skill": "C#", "frequency": 1},
+    {"skill": "3D Mathematics", "frequency": 1},
+    {"skill": "C", "frequency": 1},
+    {"skill": "RTOS", "frequency": 1},
+    {"skill": "PyTorch", "frequency": 1},
+    {"skill": "TensorFlow", "frequency": 1},
+    {"skill": "Microcontrollers", "frequency": 1},
+    {"skill": "Firmware", "frequency": 1},
+    {"skill": "Multithreading", "frequency": 1},
+    {"skill": "MLOps", "frequency": 1},
+    {"skill": "Low Latency", "frequency": 1},
+    {"skill": "Systems Programming", "frequency": 1},
+    {"skill": "Distributed Systems", "frequency": 1},
+    {"skill": "Security", "frequency": 1},
+    {"skill": "Design Patterns", "frequency": 1},
+    {"skill": "Generative AI", "frequency": 1},
+    {"skill": "Selenium", "frequency": 1},
+    {"skill": "Cypress", "frequency": 1},
+    {"skill": "Jenkins", "frequency": 1},
+    {"skill": "Test Planning", "frequency": 1},
+    {"skill": "Terraform", "frequency": 1},
+    {"skill": "LLMs", "frequency": 1},
+    {"skill": "RAG", "frequency": 1},
+    {"skill": "Prompt Engineering", "frequency": 1},
+    {"skill": "Ansible", "frequency": 1},
+    {"skill": "Network Security", "frequency": 1},
+    {"skill": "Firewalls", "frequency": 1},
+    {"skill": "LangChain", "frequency": 1},
+    {"skill": "Threat Intelligence", "frequency": 1},
+    {"skill": "Security Frameworks", "frequency": 1},
+    {"skill": "Vector Databases", "frequency": 1},
+    {"skill": "Zero Trust", "frequency": 1},
+    {"skill": "Spark", "frequency": 1},
+    {"skill": "Risk Management", "frequency": 1},
+    {"skill": "IAM", "frequency": 1},
+    {"skill": "Forensics", "frequency": 1},
+    {"skill": "Kafka", "frequency": 1},
+    {"skill": "Threat Hunting", "frequency": 1},
+    {"skill": "Malware Analysis", "frequency": 1},
+    {"skill": "Airflow", "frequency": 1},
+    {"skill": "AWS Security", "frequency": 1},
+    {"skill": "Azure Security", "frequency": 1},
+    {"skill": "ETL Pipelines", "frequency": 1},
+    {"skill": "Identity Management", "frequency": 1},
+    {"skill": "Encryption", "frequency": 1},
+    {"skill": "Metasploit", "frequency": 1},
+    {"skill": "System Design", "frequency": 1},
+    {"skill": "Burp Suite", "frequency": 1},
+    {"skill": "Network Auditing", "frequency": 1},
+    {"skill": "Cloud AI Services", "frequency": 1},
+    {"skill": "Vulnerability Assessment", "frequency": 1},
+    {"skill": "MAS TRM Guidelines", "frequency": 1},
+    {"skill": "API Integration", "frequency": 1},
+    {"skill": "Scalability", "frequency": 1},
+    {"skill": "PDPA", "frequency": 1},
+    {"skill": "Audit", "frequency": 1},
+    {"skill": "Okta", "frequency": 1},
+    {"skill": "Docker", "frequency": 1},
+    {"skill": "Model Monitoring", "frequency": 1},
+    {"skill": "Cloud Computing", "frequency": 1},
+    {"skill": "Algorithms", "frequency": 1},
+    {"skill": "Web3.js", "frequency": 1},
+    {"skill": "AI Frameworks", "frequency": 1},
+    {"skill": "Reasoning Systems", "frequency": 1},
+    {"skill": "Random Forest", "frequency": 1},
+    {"skill": "Search algorithms", "frequency": 1},
+    {"skill": "Agentic systems", "frequency": 1},
+]
+
+
+# ============================================================================
+# TEST FUNCTION FOR COURSE RECOMMENDER
+# ============================================================================
+
+import sys
+from pathlib import Path
+import pandas as pd
+
+# Add current directory to path to enable imports
+sys.path.insert(0, str(Path.cwd()))
+
+from recommender.recommender import CourseRecommender, RecommenderConfig
+from recommender.models import UserProfile, SkillGap, Modality, Schedule
+
+
+def test_recommender_with_skills():
+    """
+    Test CourseRecommender.recommend function by cycling through test_skills_list.
+    
+    For each skill:
+    1. Create a minimal SkillGap for that skill
+    2. Call recommend with empty course list
+    3. Record course titles and count
+    4. Return results as DataFrame
+    """
+    
+    # Create minimal user profile
+    user_profile = UserProfile(
+        user_id="test_user",
+        current_role="Software Developer",
+        target_role="Test Role",
+        current_skills=["Python"],
+        budget=5000.0,
+        available_hours_per_week=10.0,
+        preferred_modality=Modality.ONLINE,
+        preferred_schedule=Schedule.FLEXIBLE,
+        skillsfuture_eligible=True,
+        preferred_providers=[],
+        preferred_duration_weeks=24
+    )
+    
+    # Initialize recommender with default config (MLflow disabled)
+    config = RecommenderConfig()
+    config.enable_mlflow = False  # Disable MLflow for testing
+    recommender = CourseRecommender(config)
+    
+    # Results storage
+    results = []
+    
+    print(f"Testing {len(test_skills_list)} skills from test_skills_list...")
+    print("=" * 80)
+    
+    # Cycle through each skill
+    for idx, skill_item in enumerate(test_skills_list, 1):
+        skill_name = skill_item["skill"]
+        skill_frequency = skill_item["frequency"]
+        
+        print(f"\n[{idx}/{len(test_skills_list)}] Testing skill: {skill_name} (frequency: {skill_frequency})")
+        
+        try:
+            # Create a SkillGap for this skill using correct parameters
+            # SkillGap requires: skill, priority, current_level, target_level, gap_size
+            current_level = 0.2  # User has basic knowledge (20%)
+            target_level = 0.9   # Target proficiency level (90%)
+            gap_size = target_level - current_level  # Calculate gap size
+            
+            skill_gap = SkillGap(
+                skill=skill_name,
+                priority=0.8,  # Fixed priority for consistency
+                current_level=current_level,
+                target_level=target_level,
+                gap_size=gap_size
+            )
+            
+            # Call recommend with empty course list
+            learning_path = recommender.recommend(
+                user_profile=user_profile,
+                skill_gaps=[skill_gap],
+                candidate_courses=[]  # Empty course list as requested
+            )
+            
+            # Extract results
+            course_titles = [rec.course.title for rec in learning_path.courses]
+            num_courses = len(course_titles)
+            
+            # Record result
+            result = {
+                "skill": skill_name,
+                "frequency": skill_frequency,
+                "num_courses_returned": num_courses,
+                "course_titles": ", ".join(course_titles) if course_titles else "No courses",
+                "status": "Success"
+            }
+            
+            print(f"  ✓ Returned {num_courses} course(s)")
+            if course_titles:
+                for i, title in enumerate(course_titles, 1):
+                    print(f"    {i}. {title}")
+            else:
+                print(f"    (No courses returned)")
+            
+        except Exception as e:
+            # Handle errors gracefully
+            result = {
+                "skill": skill_name,
+                "frequency": skill_frequency,
+                "num_courses_returned": 0,
+                "course_titles": f"ERROR: {str(e)}",
+                "status": "Error"
+            }
+            print(f"  ✗ Error: {str(e)}")
+        
+        results.append(result)
+    
+    print("\n" + "=" * 80)
+    print("Testing complete!")
+    print("=" * 80)
+    
+    # Convert to DataFrame for easy viewing
+    df_results = pd.DataFrame(results)
+    
+    return df_results
+
+
+def main():
+    """Main function to execute the test and display results."""
+    print("Course Recommender Test")
+    print("=" * 80)
+    print()
+    
+    # Run test
+    results_df = test_recommender_with_skills()
+    
+    # Display summary statistics
+    print("\n" + "=" * 80)
+    print("SUMMARY STATISTICS")
+    print("=" * 80)
+    print(f"Total skills tested: {len(results_df)}")
+    print(f"Successful tests: {(results_df['status'] == 'Success').sum()}")
+    print(f"Failed tests: {(results_df['status'] == 'Error').sum()}")
+    print(f"Total courses returned: {results_df['num_courses_returned'].sum()}")
+    print(f"Average courses per skill: {results_df['num_courses_returned'].mean():.2f}")
+    print()
+    
+    # Display full results table
+    print("=" * 80)
+    print("FULL RESULTS")
+    print("=" * 80)
+    print(results_df.to_string(index=False))
+    print()
+    
+    # Display skills with most courses
+    print("=" * 80)
+    print("TOP 10 SKILLS BY COURSES RETURNED")
+    print("=" * 80)
+    top_skills = results_df.nlargest(10, 'num_courses_returned')[['skill', 'frequency', 'num_courses_returned', 'course_titles']]
+    print(top_skills.to_string(index=False))
+    
+    return results_df
+
+
+# ============================================================================
+# EXECUTE MAIN FUNCTION
+# ============================================================================
+
+# Call main() when the file is run
+main()

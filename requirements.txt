@@ -1,0 +1,45 @@
+# Core Dependencies
+databricks-sdk
+databricks-sql-connector
+streamlit
+pandas
+openai
+pyspark
+
+# Document Processing
+PyPDF2
+PyMuPDF
+python-docx
+
+# Graph & Network Analysis
+networkx
+neo4j
+
+# Machine Learning & NLP
+sentence-transformers
+scikit-learn
+numpy
+spacy
+transformers
+
+# Reasoning & Optimization
+langchain
+ortools
+
+# Deep Learning (for neural ranking)
+torch
+
+# Testing
+pytest
+
+# Web Scraping (for data ingestion)
+scrapy
+beautifulsoup4
+lxml
+
+# MLflow for experiment tracking
+mlflow
+
+# Testing Dependencies
+pytest-cov
+pytest-mock

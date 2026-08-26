@@ -1,0 +1,1800 @@
+"""
+Stage 3: Course Recommendation System
+======================================
+
+A constraint-aware, multi-technique hybrid recommender that combines:
+- Constraint Satisfaction Problem (CSP) filtering
+- Case-Based Reasoning (CBR) for experience-based recommendations
+- Fuzzy Logic for near-miss handling
+- Weighted Score Fusion for ranking
+- Intelligent Sequencing & Timeline Generation
+
+Architecture aligns with docs/stage3_course_recommendation.md
+
+INTEGRATION WITH STAGE 2 (skillgap.py):
+---------------------------------------
+This module consumes JSON output from skillgap.py's build_json_output() function.
+See parse_stage2_json() and load_stage2_from_* functions for integration options.
+
+BACKWARDS COMPATIBLE: The recommender can accept pre-filtered candidate_courses
+from skillgap (Option 1) OR discover courses internally using semantic search
+(Option 2). If candidate_courses=None, semantic search is used automatically.
+"""
+
+from typing import List, Dict, Set, Tuple, Optional, Any
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import Enum
+import math
+import json
+import sys
+import os
+from pathlib import Path
+from collections import defaultdict
+import time
+import logging
+import warnings
+import numpy as np
+
+# MLflow integration
+try:
+    import mlflow
+    import mlflow.sklearn
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    warnings.warn("MLflow not available. Set enable_mlflow=False to suppress this warning.")
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ===========================================================================
+# DATA STRUCTURES & SCHEMAS
+# ============================================================================
+
+class Modality(Enum):
+    """Course delivery modalities"""
+    ONLINE = "online"
+    ONSITE = "onsite"
+    BLENDED = "blended"
+    FLEXIBLE = "flexible"
+
+
+class Schedule(Enum):
+    """Course schedule preferences"""
+    WEEKDAY = "weekday"
+    WEEKEND = "weekend"
+    EVENING = "evening"
+    FLEXIBLE = "flexible"
+
+
+@dataclass
+class UserProfile:
+    """User profile from Stage 1"""
+    user_id: str
+    current_role: str
+    target_role: str
+    current_skills: List[str]
+    budget: float  # SGD
+    available_hours_per_week: float
+    preferred_modality: Modality
+    preferred_schedule: Schedule
+    skillsfuture_eligible: bool = True
+    preferred_providers: List[str] = field(default_factory=list)
+    preferred_duration_weeks: Optional[int] = None
+
+
+@dataclass
+class SkillGap:
+    """Prioritized skill gap from Stage 2"""
+    skill: str
+    priority: float  # 0.0 - 1.0
+    current_level: float  # 0.0 - 1.0
+    target_level: float  # 0.0 - 1.0
+    gap_size: float  # target - current
+
+
+@dataclass
+class Course:
+    """
+    Course metadata matching workspace.default.my_skills_future_course_directory schema.
+    
+    Field mapping from Delta table:
+    - coursereferencenumber -> course_id (primary key)
+    - coursetitle -> title
+    - trainingprovideruen -> provider_uen
+    - trainingprovideralias -> provider
+    - courseratings_value -> rating_value
+    - courseratings_stars -> rating
+    - courseratings_noofrespondents -> rating_respondents
+    - jobcareer_impact_value -> career_impact_value
+    - jobcareer_impact_stars -> career_impact_stars
+    - jobcareer_impact_noofrespondents -> career_impact_respondents
+    - attendancecount -> enrollment_count
+    - full_course_fee -> cost
+    - course_fee_after_subsidies -> cost_after_subsidy
+    - number_of_hours -> total_hours
+    - training_commitment -> training_commitment
+    - conducted_in -> conducted_in
+    - about_this_course -> description
+    - what_you_learn -> skills_covered (unstructured text description)
+    - minimum_entry_requirement -> prerequisites (unstructured text description)
+    """
+    # Primary identifiers
+    course_id: str  # coursereferencenumber
+    title: str  # coursetitle
+    
+    # Provider information
+    provider: str  # trainingprovideralias
+    provider_uen: Optional[str] = None  # trainingprovideruen
+    
+    # Course ratings
+    rating: float = 0.0  # courseratings_stars (0.0-5.0)
+    rating_value: Optional[float] = None  # courseratings_value
+    rating_respondents: int = 0  # courseratings_noofrespondents
+    
+    # Career impact metrics
+    career_impact_stars: Optional[float] = None  # jobcareer_impact_stars
+    career_impact_value: Optional[float] = None  # jobcareer_impact_value
+    career_impact_respondents: Optional[int] = None  # jobcareer_impact_noofrespondents
+    
+    # Enrollment and popularity
+    enrollment_count: int = 0  # attendancecount
+    
+    # Cost and subsidies
+    cost: float = 0.0  # full_course_fee (SGD before subsidy)
+    cost_after_subsidy: float = 0.0  # course_fee_after_subsidies (SGD after subsidy)
+    
+    # Duration and commitment
+    total_hours: float = 0.0  # number_of_hours
+    training_commitment: Optional[str] = None  # training_commitment (e.g., "Full-time", "Part-time")
+    
+    # Location and format
+    conducted_in: Optional[str] = None  # conducted_in (location/format)
+    
+    # Course content (unstructured text)
+    description: Optional[str] = None  # about_this_course
+    skills_covered: Optional[str] = None  # what_you_learn (unstructured description)
+    prerequisites: Optional[str] = None  # minimum_entry_requirement (unstructured description)
+    
+    # Inferred fields
+    modality: Optional[str] = None  # Inferred from training_commitment or conducted_in
+    schedule: Optional[str] = None  # Inferred from training_commitment
+    skillsfuture_eligible: bool = True  # Assume true if subsidy exists
+    
+    @property
+    def subsidy_rate(self) -> float:
+        """Calculate subsidy rate from cost and subsidized cost"""
+        if self.cost > 0:
+            return (self.cost - self.cost_after_subsidy) / self.cost
+        return 0.0
+    
+    @property
+    def duration_weeks(self) -> int:
+        """Calculate duration in weeks from total hours (assumes 10 hours/week)"""
+        if self.total_hours > 0:
+            return max(1, int(math.ceil(self.total_hours / 10.0)))
+        return 1
+    
+    @property
+    def hours_per_week(self) -> float:
+        """Estimate weekly time commitment based on training commitment"""
+        if self.training_commitment:
+            commitment_lower = self.training_commitment.lower()
+            if 'full-time' in commitment_lower or 'full time' in commitment_lower:
+                return 30.0  # Full-time: ~30 hours/week
+            elif 'part-time' in commitment_lower or 'part time' in commitment_lower:
+                return 10.0  # Part-time: ~10 hours/week
+        
+        # Fallback: calculate from duration if available
+        if self.total_hours > 0 and self.duration_weeks > 0:
+            return self.total_hours / self.duration_weeks
+        
+        return 10.0
+    
+    def get_searchable_text(self) -> str:
+        """Get concatenated text for semantic search"""
+        parts = [
+            self.title,
+            self.description or "",
+            self.skills_covered or "",
+            self.provider
+        ]
+        return " ".join(p for p in parts if p)
+
+
+@dataclass
+class FuzzyScores:
+    """Fuzzy logic degree-of-satisfaction scores"""
+    budget_fitness: float  # 0.0 - 1.0
+    time_fitness: float  # 0.0 - 1.0
+    relevance: float  # 0.0 - 1.0
+    modality_match: float  # 0.0 - 1.0
+
+
+@dataclass
+class ScoreBreakdown:
+    """Explainable score components"""
+    relevance: float  # How well it fills skill gaps
+    rating: float  # Course quality (learner ratings)
+    constraint_fit: float  # Budget/time/modality fit
+    cbr: float  # Similar users' success
+    popularity: float  # Market validation
+
+
+@dataclass
+class RecommendedCourse:
+    """Course recommendation with scores and metadata"""
+    rank: int
+    course: Course
+    final_score: float
+    score_breakdown: ScoreBreakdown
+    fuzzy_scores: FuzzyScores
+    sequence_position: str  # e.g., "Month 1-2"
+    flags: List[str] = field(default_factory=list)
+
+
+@dataclass
+class LearningPath:
+    """Complete learning path recommendation"""
+    user_id: str
+    courses: List[RecommendedCourse]
+    total_duration_weeks: int
+    total_cost: float
+    total_cost_after_subsidy: float
+    trade_offs: List[str]
+    cbr_insight: str
+    generated_at: datetime = field(default_factory=datetime.now)
+    
+    @property
+    def total_courses(self) -> int:
+        return len(self.courses)
+
+
+@dataclass
+class HistoricalCase:
+    """Case for CBR case library"""
+    case_id: str
+    user_profile: UserProfile
+    skill_gaps: List[SkillGap]
+    completed_courses: List[str]  # Course IDs
+    completion_rate: float  # 0.0 - 1.0
+    satisfaction_score: float  # 0.0 - 5.0
+    total_duration_weeks: int
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+@dataclass
+class RecommenderConfig:
+    """Configuration for recommendation weights and thresholds"""
+    
+    # Score fusion weights (must sum to 1.0)
+    weight_relevance: float = 0.35
+    weight_rating: float = 0.20
+    weight_constraints: float = 0.20
+    weight_cbr: float = 0.15
+    weight_popularity: float = 0.10
+    
+    # CBR similarity weights (must sum to 1.0)
+    cbr_weight_current_role: float = 0.20
+    cbr_weight_target_role: float = 0.25
+    cbr_weight_skill_overlap: float = 0.25
+    cbr_weight_budget: float = 0.15
+    cbr_weight_time: float = 0.15
+    
+    # Fuzzy logic thresholds
+    budget_tolerance: float = 0.15  # 15% overage allowed
+    time_tolerance: float = 0.20  # 20% stretch allowed
+    
+    # CSP parameters
+    max_courses: int = 10
+    min_relevance_threshold: float = 0.3
+    
+    # Semantic search parameters
+    semantic_search_top_k: int = 100  # Number of courses to retrieve via semantic search
+    use_semantic_search: bool = True  # Enable/disable semantic search
+    
+    # MLflow configuration
+    enable_mlflow: bool = True
+    mlflow_experiment_name: Optional[str] = None  # If None, uses default
+
+
+# ============================================================================
+# COURSE CATALOG LOADER
+# ============================================================================
+
+class CourseCatalog:
+    """
+    Course catalog manager that loads and caches courses from Delta table.
+    Handles semantic search using embeddings.
+    """
+    
+    def __init__(self, table_name: str = "workspace.default.my_skills_future_course_directory"):
+        self.table_name = table_name
+        self._courses: Optional[List[Course]] = None
+        self._embeddings_cache: Optional[Dict[str, np.ndarray]] = None
+        
+    def load_all_courses(self) -> List[Course]:
+        """Load all courses from Delta table"""
+        if self._courses is not None:
+            logger.debug(f"Using cached courses ({len(self._courses)} courses)")
+            return self._courses
+        
+        try:
+            from pyspark.sql import SparkSession
+            spark = SparkSession.builder.getOrCreate()
+            
+            df = spark.table(self.table_name)
+            rows = df.collect()
+            
+            self._courses = [_load_course_from_row(row) for row in rows]
+            logger.info(f"Loaded {len(self._courses)} courses from {self.table_name}")
+            
+            return self._courses
+            
+        except ImportError:
+            raise RuntimeError("PySpark not available. Cannot load courses from Delta table.")
+        except Exception as e:
+            logger.error(f"Failed to load courses: {e}")
+            raise
+    
+    def semantic_search(
+        self,
+        skill_gaps: List[SkillGap],
+        top_k: int = 100,
+        use_databricks_embeddings: bool = False
+    ) -> List[Course]:
+        """
+        Find courses relevant to skill gaps using semantic similarity.
+        
+        Args:
+            skill_gaps: List of skill gaps to search for
+            top_k: Number of top courses to return
+            use_databricks_embeddings: If True, use Databricks Foundation Model API
+                                      If False, use TF-IDF as fallback (default)
+        
+        Returns:
+            List of courses ranked by relevance
+        """
+        all_courses = self.load_all_courses()
+        
+        if not skill_gaps:
+            logger.warning("No skill gaps provided for semantic search")
+            return all_courses[:top_k]
+        
+        # Create query from skill gaps (weighted by priority)
+        query_parts = []
+        for gap in skill_gaps:
+            # Repeat high-priority skills for emphasis
+            weight = int(gap.priority * 5) + 1
+            query_parts.extend([gap.skill] * weight)
+        query_text = " ".join(query_parts)
+        
+        logger.info(f"Semantic search for: {len(skill_gaps)} skill gaps")
+        logger.debug(f"Query text: {query_text[:200]}...")
+        
+        if use_databricks_embeddings:
+            try:
+                courses = self._semantic_search_databricks(query_text, all_courses, top_k)
+                logger.info(f"Semantic search using Databricks embeddings returned {len(courses)} courses")
+                return courses
+            except Exception as e:
+                logger.warning(f"Databricks embeddings failed: {e}. Falling back to TF-IDF")
+        
+        # Fallback: TF-IDF similarity
+        courses = self._semantic_search_tfidf(query_text, all_courses, top_k)
+        logger.info(f"Semantic search using TF-IDF returned {len(courses)} courses")
+        return courses
+    
+    def _semantic_search_databricks(
+        self,
+        query_text: str,
+        courses: List[Course],
+        top_k: int
+    ) -> List[Course]:
+        """
+        Semantic search using Databricks Foundation Model API (BGE embeddings).
+        
+        TODO: Implement when Databricks embedding endpoint is available.
+        For now, raises NotImplementedError to trigger fallback.
+        """
+        raise NotImplementedError("Databricks embeddings not yet implemented")
+    
+    def _semantic_search_tfidf(
+        self,
+        query_text: str,
+        courses: List[Course],
+        top_k: int
+    ) -> List[Course]:
+        """
+        Semantic search using TF-IDF as fallback.
+        Simple but effective baseline.
+        """
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        # Prepare corpus
+        corpus = [course.get_searchable_text() for course in courses]
+        corpus.append(query_text)  # Add query as last document
+        
+        # Calculate TF-IDF
+        vectorizer = TfidfVectorizer(
+            max_features=1000,
+            stop_words='english',
+            ngram_range=(1, 2),
+            min_df=1
+        )
+        
+        tfidf_matrix = vectorizer.fit_transform(corpus)
+        
+        # Query is last row
+        query_vector = tfidf_matrix[-1]
+        course_vectors = tfidf_matrix[:-1]
+        
+        # Calculate cosine similarity
+        similarities = cosine_similarity(query_vector, course_vectors)[0]
+        
+        # Rank courses by similarity
+        ranked_indices = np.argsort(similarities)[::-1][:top_k]
+        ranked_courses = [courses[i] for i in ranked_indices]
+        
+        logger.debug(f"Top 5 similarity scores: {similarities[ranked_indices[:5]]}")
+        
+        return ranked_courses
+
+
+# ============================================================================
+# EVALUATION METRICS
+# ============================================================================
+
+def calculate_skill_gap_coverage(learning_path: LearningPath, skill_gaps: List[SkillGap]) -> float:
+    """Calculate percentage of skill gaps covered by recommendations"""
+    if not skill_gaps:
+        return 1.0
+    
+    covered_skills = set()
+    for rc in learning_path.courses:
+        if rc.course.skills_covered:
+            skills_text = rc.course.skills_covered.lower()
+            for gap in skill_gaps:
+                if gap.skill.lower() in skills_text:
+                    covered_skills.add(gap.skill.lower())
+    
+    coverage = len(covered_skills) / len(skill_gaps)
+    logger.debug(f"Skill gap coverage: {coverage:.2%} ({len(covered_skills)}/{len(skill_gaps)} skills)")
+    return coverage
+
+
+def calculate_weighted_skill_coverage(learning_path: LearningPath, skill_gaps: List[SkillGap]) -> float:
+    """Calculate priority-weighted skill coverage"""
+    if not skill_gaps:
+        return 1.0
+    
+    total_priority = sum(gap.priority for gap in skill_gaps)
+    if total_priority == 0:
+        return 0.0
+    
+    covered_priority = 0.0
+    
+    for gap in skill_gaps:
+        for rc in learning_path.courses:
+            if rc.course.skills_covered and gap.skill.lower() in rc.course.skills_covered.lower():
+                covered_priority += gap.priority
+                break
+    
+    weighted_coverage = covered_priority / total_priority
+    logger.debug(f"Weighted skill coverage: {weighted_coverage:.2%} (priority-adjusted)")
+    return weighted_coverage
+
+
+def calculate_recommendation_diversity(learning_path: LearningPath) -> Dict[str, float]:
+    """Calculate diversity metrics for recommendations"""
+    if not learning_path.courses:
+        return {
+            "provider_diversity": 0.0,
+            "modality_diversity": 0.0,
+            "avg_course_rating": 0.0
+        }
+    
+    providers = set(rc.course.provider for rc in learning_path.courses)
+    modalities = set(rc.course.modality for rc in learning_path.courses if rc.course.modality)
+    ratings = [rc.course.rating for rc in learning_path.courses if rc.course.rating > 0]
+    
+    provider_diversity = len(providers) / len(learning_path.courses)
+    modality_diversity = len(modalities) / len(learning_path.courses) if modalities else 0.0
+    avg_rating = sum(ratings) / len(ratings) if ratings else 0.0
+    
+    metrics = {
+        "provider_diversity": provider_diversity,
+        "modality_diversity": modality_diversity,
+        "avg_course_rating": avg_rating
+    }
+    
+    logger.debug(f"Diversity metrics: {metrics}")
+    return metrics
+
+
+def calculate_cost_efficiency(learning_path: LearningPath, skill_gaps: List[SkillGap]) -> float:
+    """Calculate cost efficiency: skills covered per $1000 SGD"""
+    coverage = calculate_weighted_skill_coverage(learning_path, skill_gaps)
+    cost = learning_path.total_cost_after_subsidy
+    
+    if cost == 0:
+        return 0.0
+    
+    efficiency = (coverage * len(skill_gaps)) / (cost / 1000.0)
+    logger.debug(f"Cost efficiency: {efficiency:.2f} skills/$1000")
+    return efficiency
+
+
+# ============================================================================
+# INPUT VALIDATION
+# ============================================================================
+
+def validate_user_profile(profile: UserProfile) -> List[str]:
+    """Validate user profile and return list of errors"""
+    errors = []
+    
+    if not profile.user_id:
+        errors.append("Missing user_id")
+    
+    if profile.budget <= 0:
+        errors.append(f"Invalid budget: {profile.budget} (must be > 0)")
+    
+    if profile.available_hours_per_week <= 0:
+        errors.append(f"Invalid hours per week: {profile.available_hours_per_week} (must be > 0)")
+    
+    if not profile.current_role:
+        errors.append("Missing current_role")
+    
+    if not profile.target_role:
+        errors.append("Missing target_role")
+    
+    if not isinstance(profile.current_skills, list):
+        errors.append("current_skills must be a list")
+    
+    return errors
+
+
+def validate_skill_gaps(skill_gaps: List[SkillGap]) -> List[str]:
+    """Validate skill gaps and return list of errors"""
+    errors = []
+    
+    if not skill_gaps:
+        errors.append("No skill gaps provided")
+        return errors
+    
+    for i, gap in enumerate(skill_gaps):
+        if not gap.skill:
+            errors.append(f"Gap {i}: Missing skill name")
+        
+        if not (0.0 <= gap.priority <= 1.0):
+            errors.append(f"Gap {i} ({gap.skill}): Invalid priority {gap.priority} (must be in [0.0, 1.0])")
+        
+        if not (0.0 <= gap.current_level <= 1.0):
+            errors.append(f"Gap {i} ({gap.skill}): Invalid current_level {gap.current_level} (must be in [0.0, 1.0])")
+        
+        if not (0.0 <= gap.target_level <= 1.0):
+            errors.append(f"Gap {i} ({gap.skill}): Invalid target_level {gap.target_level} (must be in [0.0, 1.0])")
+    
+    return errors
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def jaccard_similarity(set1: Set[str], set2: Set[str]) -> float:
+    """Calculate Jaccard similarity between two sets"""
+    if not set1 and not set2:
+        return 1.0
+    intersection = len(set1 & set2)
+    union = len(set1 | set2)
+    return intersection / union if union > 0 else 0.0
+
+
+def cosine_similarity_vectors(vec1: List[float], vec2: List[float]) -> float:
+    """Calculate cosine similarity between two vectors"""
+    if len(vec1) != len(vec2):
+        raise ValueError("Vectors must have same length")
+    
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    magnitude1 = math.sqrt(sum(a * a for a in vec1))
+    magnitude2 = math.sqrt(sum(b * b for b in vec2))
+    
+    if magnitude1 == 0 or magnitude2 == 0:
+        return 0.0
+    
+    return dot_product / (magnitude1 * magnitude2)
+
+
+def semantic_similarity(text1: str, text2: str) -> float:
+    """Calculate semantic similarity between two text strings (simple word overlap)"""
+    words1 = set(text1.lower().split())
+    words2 = set(text2.lower().split())
+    return jaccard_similarity(words1, words2)
+
+
+def normalize_score(value: float, min_val: float, max_val: float) -> float:
+    """Normalize a value to 0-1 range"""
+    if max_val == min_val:
+        return 1.0
+    return max(0.0, min(1.0, (value - min_val) / (max_val - min_val)))
+
+
+# ============================================================================
+# COMPONENT 1: CONSTRAINT SATISFACTION PROBLEM (CSP)
+# ============================================================================
+
+class ConstraintSolver:
+    """CSP-based course filtering and validation"""
+    
+    def __init__(self, config: RecommenderConfig):
+        self.config = config
+    
+    def filter_courses(
+        self,
+        candidate_courses: List[Course],
+        user_profile: UserProfile,
+        skill_gaps: List[SkillGap]
+    ) -> Tuple[List[Course], List[str]]:
+        """Filter courses based on hard constraints"""
+        valid_courses = []
+        violations = []
+        
+        logger.debug(f"CSP filtering {len(candidate_courses)} courses")
+        
+        for course in candidate_courses:
+            # Hard constraint 1: Budget (with tolerance)
+            max_budget = user_profile.budget * (1 + self.config.budget_tolerance)
+            if course.cost_after_subsidy > max_budget:
+                violations.append(
+                    f"{course.title}: Exceeds budget limit including tolerance (${course.cost_after_subsidy:.0f} > ${max_budget:.0f})"
+                )
+                continue
+            
+            # Hard constraint 2: Time availability (with tolerance)
+            max_time = user_profile.available_hours_per_week * (1 + self.config.time_tolerance)
+            if course.hours_per_week > max_time:
+                violations.append(
+                    f"{course.title}: Insufficient time including tolerance ({course.hours_per_week:.1f} hrs/week > {max_time:.1f} available)"
+                )
+                continue
+            
+            # Hard constraint 3: SkillsFuture eligibility
+            if user_profile.skillsfuture_eligible and not course.skillsfuture_eligible:
+                violations.append(
+                    f"{course.title}: Not SkillsFuture eligible"
+                )
+                continue
+            
+            # Hard constraint 4: Relevance — threshold-based check
+            relevance_score = self.calculate_relevance(course, skill_gaps)
+            if relevance_score < self.config.min_relevance_threshold:
+                violations.append(
+                    f"{course.title}: Low relevance ({relevance_score:.2f} < threshold {self.config.min_relevance_threshold:.2f})"
+                )
+                continue
+            
+            valid_courses.append(course)
+        
+        logger.info(f"CSP filtered: {len(valid_courses)} valid courses, {len(violations)} violations")
+        return valid_courses, violations
+
+    def calculate_relevance(self, course: Course, skill_gaps: List[SkillGap]) -> float:
+        """Calculate how relevant a course is to the skill gaps"""
+        if not course.skills_covered:
+            return 0.0
+        
+        skills_text_lower = course.skills_covered.lower()
+        
+        total_priority = 0.0
+        matched_priority = 0.0
+        
+        from .utils import expand_skill_with_synonyms
+        
+        for gap in skill_gaps:
+            total_priority += gap.priority
+            skill_variants = expand_skill_with_synonyms(gap.skill)
+            if any(v in skills_text_lower for v in skill_variants):
+                matched_priority += gap.priority
+        
+        if total_priority == 0:
+            return 0.0
+        
+        return matched_priority / total_priority
+    
+    def soft_constraint_score(self, course: Course, user_profile: UserProfile) -> float:
+        """Score based on preference match"""
+        score = 0.0
+        weight_per_item = 1.0 / 3.0
+        
+        # Modality preference
+        if user_profile.preferred_modality == Modality.FLEXIBLE:
+            score += weight_per_item
+        elif course.modality:
+            modality_lower = course.modality.lower()
+            pref_value = user_profile.preferred_modality.value.lower()
+            if pref_value in modality_lower or modality_lower in pref_value:
+                score += weight_per_item
+        
+        # Schedule preference
+        if user_profile.preferred_schedule == Schedule.FLEXIBLE:
+            score += weight_per_item
+        elif course.schedule:
+            schedule_lower = course.schedule.lower()
+            pref_value = user_profile.preferred_schedule.value.lower()
+            if pref_value in schedule_lower or schedule_lower in pref_value:
+                score += weight_per_item
+        
+        # Provider preference
+        if not user_profile.preferred_providers or \
+           course.provider in user_profile.preferred_providers:
+            score += weight_per_item
+        
+        return score
+
+
+# ============================================================================
+# COMPONENT 2: CASE-BASED REASONING (CBR)
+# ============================================================================
+
+class CaseLibrary:
+    """Case-based reasoning engine using historical user data"""
+    
+    def __init__(self, config: RecommenderConfig):
+        self.config = config
+        self.cases: List[HistoricalCase] = []
+    
+    def add_case(self, case: HistoricalCase):
+        """Add a historical case to the library"""
+        self.cases.append(case)
+    
+    def find_similar_cases(
+        self,
+        query_profile: UserProfile,
+        query_gaps: List[SkillGap],
+        top_k: int = 5
+    ) -> List[Tuple[HistoricalCase, float]]:
+        """Find k most similar historical cases"""
+        similarities = []
+        
+        for case in self.cases:
+            similarity = self._calculate_case_similarity(
+                query_profile,
+                query_gaps,
+                case.user_profile,
+                case.skill_gaps
+            )
+            similarities.append((case, similarity))
+        
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        return similarities[:top_k]
+    
+    def _calculate_case_similarity(
+        self,
+        query_profile: UserProfile,
+        query_gaps: List[SkillGap],
+        case_profile: UserProfile,
+        case_gaps: List[SkillGap]
+    ) -> float:
+        """Calculate weighted similarity between query and case"""
+        current_role_sim = semantic_similarity(
+            query_profile.current_role,
+            case_profile.current_role
+        )
+        target_role_sim = semantic_similarity(
+            query_profile.target_role,
+            case_profile.target_role
+        )
+        
+        query_skill_set = set(g.skill.lower() for g in query_gaps)
+        case_skill_set = set(g.skill.lower() for g in case_gaps)
+        skill_overlap = jaccard_similarity(query_skill_set, case_skill_set)
+        
+        budget_diff = abs(query_profile.budget - case_profile.budget)
+        budget_max = max(query_profile.budget, case_profile.budget)
+        budget_sim = 1.0 - (budget_diff / budget_max) if budget_max > 0 else 1.0
+        
+        time_diff = abs(query_profile.available_hours_per_week - case_profile.available_hours_per_week)
+        time_max = max(query_profile.available_hours_per_week, case_profile.available_hours_per_week)
+        time_sim = 1.0 - (time_diff / time_max) if time_max > 0 else 1.0
+        
+        similarity = (
+            self.config.cbr_weight_current_role * current_role_sim +
+            self.config.cbr_weight_target_role * target_role_sim +
+            self.config.cbr_weight_skill_overlap * skill_overlap +
+            self.config.cbr_weight_budget * budget_sim +
+            self.config.cbr_weight_time * time_sim
+        )
+        
+        return similarity
+    
+    def recommend_from_cases(
+        self,
+        similar_cases: List[Tuple[HistoricalCase, float]],
+        candidate_courses: List[Course]
+    ) -> Dict[str, float]:
+        """Generate course recommendations based on similar cases"""
+        course_scores = defaultdict(float)
+        total_weight = 0.0
+        
+        for case, similarity in similar_cases:
+            case_weight = similarity * case.completion_rate * (case.satisfaction_score / 5.0)
+            
+            for course_id in case.completed_courses:
+                course_scores[course_id] += case_weight
+            
+            total_weight += case_weight
+        
+        if total_weight > 0:
+            course_scores = {
+                cid: score / total_weight
+                for cid, score in course_scores.items()
+            }
+        
+        return dict(course_scores)
+
+
+# ============================================================================
+# COMPONENT 3: FUZZY LOGIC SCORING
+# ============================================================================
+
+class FuzzyScorer:
+    """Fuzzy logic system for handling near-miss constraints"""
+    
+    def __init__(self, config: RecommenderConfig):
+        self.config = config
+    
+    def calculate_fuzzy_scores(
+        self,
+        course: Course,
+        user_profile: UserProfile,
+        skill_gaps: List[SkillGap]
+    ) -> FuzzyScores:
+        """Calculate fuzzy membership degrees for all criteria"""
+        budget_fit = self._budget_membership(course, user_profile)
+        time_fit = self._time_membership(course, user_profile)
+        relevance = self._relevance_membership(course, skill_gaps)
+        modality_fit = self._modality_membership(course, user_profile)
+        
+        return FuzzyScores(
+            budget_fitness=budget_fit,
+            time_fitness=time_fit,
+            relevance=relevance,
+            modality_match=modality_fit
+        )
+    
+    def _budget_membership(self, course: Course, user_profile: UserProfile) -> float:
+        """Fuzzy membership for budget constraint"""
+        cost = course.cost_after_subsidy
+        budget = user_profile.budget
+        tolerance = self.config.budget_tolerance
+        
+        if cost <= budget:
+            return 1.0
+        
+        max_acceptable = budget * (1 + tolerance)
+        if cost >= max_acceptable:
+            return 0.0
+        
+        return 1.0 - ((cost - budget) / (max_acceptable - budget))
+    
+    def _time_membership(self, course: Course, user_profile: UserProfile) -> float:
+        """Fuzzy membership for time availability constraint"""
+        required = course.hours_per_week
+        available = user_profile.available_hours_per_week
+        tolerance = self.config.time_tolerance
+        
+        if required <= available:
+            return 1.0
+        
+        max_acceptable = available * (1 + tolerance)
+        if required >= max_acceptable:
+            return 0.0
+        
+        return 1.0 - ((required - available) / (max_acceptable - available))
+    
+    def _relevance_membership(self, course: Course, skill_gaps: List[SkillGap]) -> float:
+        """Fuzzy relevance based on skill coverage and priority"""
+        if not course.skills_covered:
+            return 0.0
+        
+        skills_text_lower = course.skills_covered.lower()
+        
+        matched_priority = 0.0
+        total_priority = 0.0
+        
+        for gap in skill_gaps:
+            total_priority += gap.priority
+            if gap.skill.lower() in skills_text_lower:
+                matched_priority += gap.priority
+        
+        if total_priority == 0:
+            return 0.0
+        
+        return matched_priority / total_priority
+    
+    def _modality_membership(self, course: Course, user_profile: UserProfile) -> float:
+        """Fuzzy membership for modality preference"""
+        if user_profile.preferred_modality == Modality.FLEXIBLE:
+            return 1.0
+        
+        if not course.modality:
+            return 0.8
+        
+        modality_lower = course.modality.lower()
+        pref_value = user_profile.preferred_modality.value.lower()
+        
+        if pref_value in modality_lower or modality_lower in pref_value:
+            return 1.0
+        
+        if 'blended' in modality_lower or 'hybrid' in modality_lower:
+            return 0.7
+        
+        return 0.3
+
+
+# ============================================================================
+# COMPONENT 4: SCORE FUSION & RANKING
+# ============================================================================
+
+class ScoreFusion:
+    """Combines multiple scoring dimensions into final ranking"""
+    
+    def __init__(self, config: RecommenderConfig):
+        self.config = config
+    
+    def calculate_final_scores(
+        self,
+        courses: List[Course],
+        relevance_scores: Dict[str, float],
+        cbr_scores: Dict[str, float],
+        fuzzy_scores_map: Dict[str, FuzzyScores],
+        soft_constraint_scores: Dict[str, float]
+    ) -> List[Tuple[Course, float, ScoreBreakdown, FuzzyScores]]:
+        """Calculate final scores for all courses"""
+        results = []
+        
+        for course in courses:
+            cid = course.course_id
+            
+            relevance = relevance_scores.get(cid, 0.0)
+            rating_norm = normalize_score(course.rating, 0.0, 5.0)
+            constraint_fit = soft_constraint_scores.get(cid, 0.5)
+            cbr_score = cbr_scores.get(cid, 0.5)
+            
+            max_enrollment = max(c.enrollment_count for c in courses) if courses else 1
+            popularity = normalize_score(course.enrollment_count, 0, max_enrollment)
+            
+            final_score = (
+                self.config.weight_relevance * relevance +
+                self.config.weight_rating * rating_norm +
+                self.config.weight_constraints * constraint_fit +
+                self.config.weight_cbr * cbr_score +
+                self.config.weight_popularity * popularity
+            )
+            
+            breakdown = ScoreBreakdown(
+                relevance=relevance,
+                rating=rating_norm,
+                constraint_fit=constraint_fit,
+                cbr=cbr_score,
+                popularity=popularity
+            )
+            
+            fuzzy = fuzzy_scores_map[cid]
+            
+            results.append((course, final_score, breakdown, fuzzy))
+        
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
+
+# ============================================================================
+# COMPONENT 5: INTELLIGENT SEQUENCING
+# ============================================================================
+
+class CourseSequencer:
+    """Generates optimal course sequence"""
+    
+    def sequence_courses(
+        self,
+        ranked_courses: List[Tuple[Course, float, ScoreBreakdown, FuzzyScores]],
+        max_courses: int = 10
+    ) -> List[RecommendedCourse]:
+        """Create sequenced learning path with timeline"""
+        top_courses = ranked_courses[:max_courses]
+        
+        sequenced = []
+        current_week = 0
+        
+        for rank, (course, score, breakdown, fuzzy) in enumerate(top_courses, 1):
+            start_week = current_week
+            end_week = current_week + course.duration_weeks
+            position = self._format_timeline(start_week, end_week)
+            
+            recommended = RecommendedCourse(
+                rank=rank,
+                course=course,
+                final_score=score,
+                score_breakdown=breakdown,
+                fuzzy_scores=fuzzy,
+                sequence_position=position,
+                flags=[]
+            )
+            
+            sequenced.append(recommended)
+            current_week = end_week
+        
+        return sequenced
+    
+    def _format_timeline(self, start_week: int, end_week: int) -> str:
+        """Format timeline position"""
+        start_month = (start_week // 4) + 1
+        end_month = ((end_week - 1) // 4) + 1
+        
+        if start_month == end_month:
+            return f"Month {start_month}"
+        else:
+            return f"Month {start_month}-{end_month}"
+
+
+# ============================================================================
+# MAIN RECOMMENDER SYSTEM
+# ============================================================================
+
+class CourseRecommender:
+    """Main recommendation engine coordinating all components"""
+    
+    def __init__(self, config: Optional[RecommenderConfig] = None):
+        self.config = config or RecommenderConfig()
+        self.catalog = CourseCatalog()
+        self.csp_solver = ConstraintSolver(self.config)
+        self.case_library = CaseLibrary(self.config)
+        self.fuzzy_scorer = FuzzyScorer(self.config)
+        self.score_fusion = ScoreFusion(self.config)
+        self.sequencer = CourseSequencer()
+    
+    def recommend(
+        self,
+        user_profile: UserProfile,
+        skill_gaps: List[SkillGap],
+        candidate_courses: Optional[List[Course]] = None
+    ) -> LearningPath:
+        """
+        Generate complete learning path recommendation.
+        
+        Args:
+            user_profile: User profile with constraints
+            skill_gaps: List of prioritized skill gaps
+            candidate_courses: Optional pre-filtered courses from skillgap.
+                              If None, uses semantic search to discover courses.
+        
+        Returns:
+            LearningPath with recommended courses
+        """
+        logger.info(f"Input: {len(skill_gaps)} skill gaps")
+        
+        # Input validation
+        validation_errors = validate_user_profile(user_profile)
+        if validation_errors:
+            error_msg = f"Invalid user profile: {'; '.join(validation_errors)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        gap_errors = validate_skill_gaps(skill_gaps)
+        if gap_errors:
+            error_msg = f"Invalid skill gaps: {'; '.join(gap_errors)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Execute recommendation
+        if self.config.enable_mlflow and MLFLOW_AVAILABLE:
+            return self._recommend_with_mlflow(user_profile, skill_gaps, candidate_courses)
+        else:
+            if self.config.enable_mlflow and not MLFLOW_AVAILABLE:
+                logger.warning("MLflow tracking requested but MLflow not available")
+            return self._recommend_impl(user_profile, skill_gaps, candidate_courses)
+    
+    def _recommend_with_mlflow(
+        self,
+        user_profile: UserProfile,
+        skill_gaps: List[SkillGap],
+        candidate_courses: Optional[List[Course]] = None
+    ) -> LearningPath:
+        experiment_name = self.config.mlflow_experiment_name or f"/Users/{user_profile.user_id.split('@')[0]}/skillup/recommender"
+        
+        try:
+            mlflow.set_experiment(experiment_name)
+        except Exception as e:
+            logger.warning(f"Failed to set MLflow experiment: {e}")
+        
+        with mlflow.start_run():
+            start_time = time.time()
+            
+            try:
+                mlflow.log_params({
+                    "user_id": user_profile.user_id,
+                    "current_role": user_profile.current_role,
+                    "target_role": user_profile.target_role,
+                    "budget_sgd": user_profile.budget,
+                    "available_hours_per_week": user_profile.available_hours_per_week,
+                    "num_skill_gaps": len(skill_gaps),
+                    "use_semantic_search": self.config.use_semantic_search,
+                    "semantic_search_top_k": self.config.semantic_search_top_k,
+                    "config_weight_relevance": self.config.weight_relevance,
+                    "config_max_courses": self.config.max_courses,
+                    "candidate_courses_source": "pre_filtered" if candidate_courses else "semantic_search"
+                })
+            except Exception as e:
+                logger.warning(f"Failed to log MLflow parameters: {e}")
+            
+            try:
+                learning_path = self._recommend_impl(user_profile, skill_gaps, candidate_courses)
+            except Exception as e:
+                logger.exception(f"Recommendation failed: {e}")
+                execution_time = time.time() - start_time
+                
+                try:
+                    mlflow.log_metrics({
+                        "execution_time_seconds": execution_time,
+                        "num_recommended": 0,
+                        "success": 0
+                    })
+                except:
+                    pass
+                
+                raise
+            
+            execution_time = time.time() - start_time
+            
+            # Calculate metrics
+            skill_gap_coverage = calculate_skill_gap_coverage(learning_path, skill_gaps)
+            weighted_skill_coverage = calculate_weighted_skill_coverage(learning_path, skill_gaps)
+            diversity_metrics = calculate_recommendation_diversity(learning_path)
+            cost_efficiency = calculate_cost_efficiency(learning_path, skill_gaps)
+            
+            budget_utilization = learning_path.total_cost_after_subsidy / user_profile.budget if user_profile.budget > 0 else 0.0
+            
+            avg_final_score = sum(rc.final_score for rc in learning_path.courses) / len(learning_path.courses) if learning_path.courses else 0.0
+            avg_relevance_score = sum(rc.score_breakdown.relevance for rc in learning_path.courses) / len(learning_path.courses) if learning_path.courses else 0.0
+            
+            try:
+                mlflow.log_metrics({
+                    "execution_time_seconds": execution_time,
+                    "success": 1,
+                    "num_recommended": learning_path.total_courses,
+                    "total_duration_weeks": learning_path.total_duration_weeks,
+                    "total_cost_sgd": learning_path.total_cost,
+                    "total_cost_after_subsidy_sgd": learning_path.total_cost_after_subsidy,
+                    "skill_gap_coverage": skill_gap_coverage,
+                    "weighted_skill_coverage": weighted_skill_coverage,
+                    "provider_diversity": diversity_metrics["provider_diversity"],
+                    "modality_diversity": diversity_metrics["modality_diversity"],
+                    "avg_course_rating": diversity_metrics["avg_course_rating"],
+                    "cost_efficiency_skills_per_1k": cost_efficiency,
+                    "budget_utilization": budget_utilization,
+                    "avg_final_score": avg_final_score,
+                    "avg_relevance_score": avg_relevance_score
+                })
+            except Exception as e:
+                logger.warning(f"Failed to log MLflow metrics: {e}")
+            
+            try:
+                mlflow.set_tags({
+                    "stage": "stage3_recommendation",
+                    "target_role": user_profile.target_role,
+                    "user_id": user_profile.user_id
+                })
+            except Exception as e:
+                logger.warning(f"Failed to set MLflow tags: {e}")
+            
+            logger.info(f"Recommendation complete: {learning_path.total_courses} courses, ${learning_path.total_cost_after_subsidy:.2f}, {execution_time:.2f}s")
+            
+            return learning_path
+    
+    def _recommend_impl(
+        self,
+        user_profile: UserProfile,
+        skill_gaps: List[SkillGap],
+        candidate_courses: Optional[List[Course]] = None
+    ) -> LearningPath:
+        """Core recommendation implementation
+        
+        Args:
+            candidate_courses: Optional pre-filtered courses. If None, discovers via semantic search.
+        """
+        try:
+            # Step 1: Get candidate courses (pre-filtered or via semantic search)
+            logger.debug("Step 1: Getting candidate courses")
+            if candidate_courses is not None:
+                # Use pre-filtered courses from skillgap
+                logger.info(f"Using {len(candidate_courses)} pre-filtered candidate courses from skillgap")
+            elif self.config.use_semantic_search:
+                # Discover courses via semantic search
+                candidate_courses = self.catalog.semantic_search(
+                    skill_gaps,
+                    top_k=self.config.semantic_search_top_k
+                )
+                logger.info(f"Semantic search retrieved {len(candidate_courses)} candidate courses")
+            else:
+                # Use full catalog
+                candidate_courses = self.catalog.load_all_courses()
+                logger.info(f"Using full catalog: {len(candidate_courses)} courses")
+            
+            # Step 2: CSP Filtering
+            logger.debug("Step 2: CSP filtering")
+            valid_courses, violations = self.csp_solver.filter_courses(
+                candidate_courses,
+                user_profile,
+                skill_gaps
+            )
+            
+            if not valid_courses:
+                logger.warning(f"No valid courses found for user_id={user_profile.user_id}")
+                return LearningPath(
+                    user_id=user_profile.user_id,
+                    courses=[],
+                    total_duration_weeks=0,
+                    total_cost=0.0,
+                    total_cost_after_subsidy=0.0,
+                    trade_offs=violations,
+                    cbr_insight="No valid courses found matching constraints."
+                )
+            
+            # Step 3: Calculate relevance scores
+            logger.debug("Step 3: Calculating relevance scores")
+            relevance_scores = {
+                course.course_id: self.csp_solver.calculate_relevance(course, skill_gaps)
+                for course in valid_courses
+            }
+            
+            # Step 4: CBR recommendations
+            logger.debug("Step 4: CBR recommendations")
+            similar_cases = self.case_library.find_similar_cases(
+                user_profile,
+                skill_gaps,
+                top_k=5
+            )
+            cbr_scores = self.case_library.recommend_from_cases(
+                similar_cases,
+                valid_courses
+            )
+            
+            # Step 5: Fuzzy scoring
+            logger.debug("Step 5: Fuzzy scoring")
+            fuzzy_scores_map = {
+                course.course_id: self.fuzzy_scorer.calculate_fuzzy_scores(
+                    course,
+                    user_profile,
+                    skill_gaps
+                )
+                for course in valid_courses
+            }
+            
+            # Step 6: Soft constraint scores
+            logger.debug("Step 6: Soft constraint scoring")
+            soft_constraint_scores = {
+                course.course_id: self.csp_solver.soft_constraint_score(course, user_profile)
+                for course in valid_courses
+            }
+            
+            # Step 7: Score fusion
+            logger.debug("Step 7: Score fusion and ranking")
+            ranked_courses = self.score_fusion.calculate_final_scores(
+                valid_courses,
+                relevance_scores,
+                cbr_scores,
+                fuzzy_scores_map,
+                soft_constraint_scores
+            )
+            
+            # Step 8: Sequencing
+            logger.debug("Step 8: Sequencing")
+            sequenced_courses = self.sequencer.sequence_courses(
+                ranked_courses,
+                max_courses=self.config.max_courses
+            )
+            
+            # Calculate totals
+            total_duration = sum(rc.course.duration_weeks for rc in sequenced_courses)
+            total_cost = sum(rc.course.cost for rc in sequenced_courses)
+            total_cost_after_subsidy = sum(rc.course.cost_after_subsidy for rc in sequenced_courses)
+            
+            cbr_insight = self._generate_cbr_insight(similar_cases)
+            
+            return LearningPath(
+                user_id=user_profile.user_id,
+                courses=sequenced_courses,
+                total_duration_weeks=total_duration,
+                total_cost=total_cost,
+                total_cost_after_subsidy=total_cost_after_subsidy,
+                trade_offs=violations,
+                cbr_insight=cbr_insight
+            )
+        
+        except Exception as e:
+            logger.exception(f"Recommendation implementation failed: {e}")
+            return LearningPath(
+                user_id=user_profile.user_id,
+                courses=[],
+                total_duration_weeks=0,
+                total_cost=0.0,
+                total_cost_after_subsidy=0.0,
+                trade_offs=[f"System error: {str(e)}"],
+                cbr_insight="Recommendation failed due to system error."
+            )
+    
+    def _generate_cbr_insight(
+        self,
+        similar_cases: List[Tuple[HistoricalCase, float]]
+    ) -> str:
+        """Generate human-readable CBR insight"""
+        if not similar_cases:
+            return "No similar historical profiles found."
+        
+        best_case, similarity = similar_cases[0]
+        
+        return (
+            f"Found {len(similar_cases)} similar profiles. "
+            f"Top match: {best_case.user_profile.current_role} -> {best_case.user_profile.target_role} "
+            f"(similarity: {similarity:.2f}, success rate: {best_case.completion_rate:.1%})"
+        )
+
+
+# ============================================================================
+# JSON INPUT/OUTPUT INTEGRATION (STAGE 2 ↔ STAGE 3)
+# ============================================================================
+
+def parse_stage2_json(stage2_output: Dict[str, Any]) -> Tuple[str, List[SkillGap]]:
+    """
+    Parse Stage 2 JSON output (from skillgap.py) into Stage 3 data structures.
+    
+    NOTE: candidate_course_ids are now ignored. The recommender handles course discovery.
+    
+    Returns:
+        (target_role, skill_gaps)
+    """
+    if "skill_gaps" not in stage2_output:
+        raise KeyError("Missing required field 'skill_gaps' in Stage 2 JSON output")
+    
+    skill_gaps_data = stage2_output["skill_gaps"]
+    
+    if "target_role" not in skill_gaps_data:
+        raise KeyError("Missing required field 'target_role' in skill_gaps")
+    target_role = skill_gaps_data["target_role"]
+    
+    if "gaps" not in skill_gaps_data:
+        raise KeyError("Missing required field 'gaps' in skill_gaps")
+    
+    skill_gaps = []
+    for i, gap_data in enumerate(skill_gaps_data["gaps"]):
+        try:
+            skill_name = gap_data.get("skill")
+            if not skill_name:
+                raise ValueError(f"Gap {i}: Missing 'skill' field")
+            
+            priority_str = gap_data.get("priority", "medium")
+            priority_value = _priority_to_float(priority_str)
+            
+            current_level = float(gap_data.get("user_skill_proficiency", 0.0))
+            gap_weight = float(gap_data.get("gap_weight", 0.5))
+            
+            target_level = min(1.0, current_level + gap_weight)
+            
+            if not (0.0 <= current_level <= 1.0):
+                raise ValueError(f"Gap {i}: user_skill_proficiency must be in [0.0, 1.0]")
+            if not (0.0 <= gap_weight <= 1.0):
+                raise ValueError(f"Gap {i}: gap_weight must be in [0.0, 1.0]")
+            
+            gap = SkillGap(
+                skill=skill_name,
+                priority=priority_value,
+                current_level=current_level,
+                target_level=target_level,
+                gap_size=gap_weight
+            )
+            skill_gaps.append(gap)
+            
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning(f"Skipping gap {i} due to error: {e}")
+            continue
+    
+    if not skill_gaps:
+        raise ValueError("No valid skill gaps found in Stage 2 JSON output")
+    
+    logger.info(f"Parsed Stage 2 JSON: target_role={target_role}, {len(skill_gaps)} skill gaps")
+    
+    return target_role, skill_gaps
+
+
+def parse_stage2_multi_role_json(
+    all_role_results: List[Dict[str, Any]]
+) -> Dict[str, List[SkillGap]]:
+    """
+    Parse Stage 2 multi-role JSON output.
+    
+    Returns:
+        Dictionary mapping target_role -> skill_gaps
+    """
+    if not isinstance(all_role_results, list):
+        raise ValueError("all_role_results must be a list")
+    
+    if not all_role_results:
+        raise ValueError("all_role_results is empty")
+    
+    role_data_map = {}
+    successful_parses = 0
+    failed_parses = 0
+    
+    logger.info(f"Parsing {len(all_role_results)} role results from skillgap.py")
+    
+    for i, role_result in enumerate(all_role_results):
+        try:
+            target_role, skill_gaps = parse_stage2_json(role_result)
+            role_data_map[target_role] = skill_gaps
+            successful_parses += 1
+        except (KeyError, ValueError, TypeError) as e:
+            failed_parses += 1
+            logger.warning(f"Failed to parse role result {i}: {e}")
+            continue
+    
+    logger.info(f"Successfully parsed {successful_parses} role(s), failed {failed_parses}")
+    
+    if not role_data_map:
+        raise ValueError("No valid role results could be parsed")
+    
+    return role_data_map
+
+
+def _priority_to_float(priority_str: str) -> float:
+    """Convert priority string to normalized float value"""
+    priority_map = {
+        "critical": 0.95,
+        "high": 0.75,
+        "medium": 0.50,
+        "low": 0.25
+    }
+    normalized = priority_str.lower().strip()
+    return priority_map.get(normalized, 0.50)
+
+
+def load_stage2_from_json_file(filepath: str) -> Tuple[str, List[SkillGap]]:
+    """Load Stage 2 JSON from file (single role)"""
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return parse_stage2_json(data)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Stage 2 JSON file not found: {filepath}")
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(f"Invalid JSON in file {filepath}: {e}", e.doc, e.pos)
+
+
+def load_stage2_multi_role_from_json_file(filepath: str) -> Dict[str, List[SkillGap]]:
+    """Load Stage 2 multi-role JSON from file"""
+    try:
+        with open(filepath, 'r') as f:
+            all_role_results = json.load(f)
+        return parse_stage2_multi_role_json(all_role_results)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Stage 2 JSON file not found: {filepath}")
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(f"Invalid JSON in file {filepath}: {e}", e.doc, e.pos)
+
+
+# ============================================================================
+# JSON OUTPUT SERIALIZATION (STAGE 3 -> DOWNSTREAM)
+# ============================================================================
+
+def serialize_learning_path_to_json(learning_path: LearningPath) -> Dict[str, Any]:
+    """Serialize LearningPath to JSON format"""
+    return {
+        "user_id": learning_path.user_id,
+        "generated_at": learning_path.generated_at.isoformat(),
+        "summary": {
+            "total_courses": learning_path.total_courses,
+            "total_duration_weeks": learning_path.total_duration_weeks,
+            "total_cost_sgd": learning_path.total_cost,
+            "total_cost_after_subsidy_sgd": learning_path.total_cost_after_subsidy,
+            "total_savings_sgd": learning_path.total_cost - learning_path.total_cost_after_subsidy,
+            "subsidy_rate": (
+                (learning_path.total_cost - learning_path.total_cost_after_subsidy) / learning_path.total_cost
+                if learning_path.total_cost > 0 else 0.0
+            )
+        },
+        "cbr_insight": learning_path.cbr_insight,
+        "trade_offs": learning_path.trade_offs,
+        "recommended_courses": [
+            _serialize_recommended_course(rc)
+            for rc in learning_path.courses
+        ]
+    }
+
+
+def _serialize_recommended_course(rc: RecommendedCourse) -> Dict[str, Any]:
+    """Serialize a single RecommendedCourse"""
+    return {
+        "rank": rc.rank,
+        "sequence_position": rc.sequence_position,
+        "course": {
+            "course_id": rc.course.course_id,
+            "title": rc.course.title,
+            "provider": rc.course.provider,
+            "duration_weeks": rc.course.duration_weeks,
+            "cost_sgd": rc.course.cost,
+            "cost_after_subsidy_sgd": rc.course.cost_after_subsidy,
+            "subsidy_rate": rc.course.subsidy_rate,
+            "savings_sgd": rc.course.cost - rc.course.cost_after_subsidy,
+            "modality": rc.course.modality or "flexible",
+            "schedule": rc.course.schedule or "flexible",
+            "skills_covered": rc.course.skills_covered or "",
+            "prerequisites": rc.course.prerequisites or "",
+            "rating": rc.course.rating,
+            "enrollment_count": rc.course.enrollment_count,
+            "skillsfuture_eligible": rc.course.skillsfuture_eligible,
+            "estimated_hours_per_week": rc.course.hours_per_week
+        },
+        "scores": {
+            "final_score": rc.final_score,
+            "score_breakdown": {
+                "relevance": rc.score_breakdown.relevance,
+                "rating": rc.score_breakdown.rating,
+                "constraint_fit": rc.score_breakdown.constraint_fit,
+                "cbr_similarity": rc.score_breakdown.cbr,
+                "popularity": rc.score_breakdown.popularity
+            },
+            "fuzzy_logic_scores": {
+                "budget_fitness": rc.fuzzy_scores.budget_fitness,
+                "time_fitness": rc.fuzzy_scores.time_fitness,
+                "skill_relevance": rc.fuzzy_scores.relevance,
+                "modality_match": rc.fuzzy_scores.modality_match
+            }
+        },
+        "warnings": rc.flags
+    }
+
+
+def save_learning_path_to_json(learning_path: LearningPath, filepath: str):
+    """Save LearningPath to JSON file"""
+    data = serialize_learning_path_to_json(learning_path)
+    
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    logger.info(f"Saved learning path to: {filepath}")
+
+
+# ============================================================================
+# HELPER FUNCTION: DELTA TABLE COURSE LOADING
+# ============================================================================
+
+def _load_course_from_row(row) -> Course:
+    """Create a Course object from a Delta table row"""
+    # Convert PySpark Row to dict for easier access with .get()
+    row_dict = row.asDict()
+    
+    course_id = row_dict['coursereferencenumber']
+    title = row_dict['coursetitle']
+    provider = row_dict['trainingprovideralias']
+    provider_uen = row_dict.get('trainingprovideruen')
+    
+    rating = float(row_dict['courseratings_stars']) if row_dict['courseratings_stars'] is not None else 0.0
+    rating_value = float(row_dict.get('courseratings_value')) if row_dict.get('courseratings_value') is not None else None
+    rating_respondents = int(row_dict['courseratings_noofrespondents']) if row_dict['courseratings_noofrespondents'] is not None else 0
+    
+    career_impact_stars = float(row_dict.get('jobcareer_impact_stars')) if row_dict.get('jobcareer_impact_stars') is not None else None
+    career_impact_value = float(row_dict.get('jobcareer_impact_value')) if row_dict.get('jobcareer_impact_value') is not None else None
+    career_impact_respondents = int(row_dict.get('jobcareer_impact_noofrespondents')) if row_dict.get('jobcareer_impact_noofrespondents') is not None else None
+    
+    enrollment_count = int(row_dict['attendancecount']) if row_dict['attendancecount'] is not None else 0
+    cost = float(row_dict['full_course_fee']) if row_dict['full_course_fee'] is not None else 0.0
+    cost_after_subsidy = float(row_dict['course_fee_after_subsidies']) if row_dict['course_fee_after_subsidies'] is not None else cost
+    
+    total_hours = float(row_dict['number_of_hours']) if row_dict['number_of_hours'] is not None else 0.0
+    training_commitment = row_dict.get('training_commitment')
+    conducted_in = row_dict.get('conducted_in')
+    
+    description = row_dict.get('about_this_course')
+    skills_covered = row_dict.get('what_you_learn')
+    prerequisites = row_dict.get('minimum_entry_requirement')
+    
+    modality = None
+    if conducted_in:
+        conducted_lower = str(conducted_in).lower()
+        if 'online' in conducted_lower:
+            modality = 'online'
+        elif 'classroom' in conducted_lower or 'onsite' in conducted_lower:
+            modality = 'onsite'
+        elif 'blended' in conducted_lower or 'hybrid' in conducted_lower:
+            modality = 'blended'
+    
+    schedule = None
+    if training_commitment:
+        commitment_lower = str(training_commitment).lower()
+        if 'weekday' in commitment_lower:
+            schedule = 'weekday'
+        elif 'weekend' in commitment_lower:
+            schedule = 'weekend'
+        elif 'evening' in commitment_lower:
+            schedule = 'evening'
+    
+    skillsfuture_eligible = (cost > cost_after_subsidy) if cost > 0 else True
+    
+    return Course(
+        course_id=course_id,
+        title=title,
+        provider=provider,
+        provider_uen=provider_uen,
+        rating=rating,
+        rating_value=rating_value,
+        rating_respondents=rating_respondents,
+        career_impact_stars=career_impact_stars,
+        career_impact_value=career_impact_value,
+        career_impact_respondents=career_impact_respondents,
+        enrollment_count=enrollment_count,
+        cost=cost,
+        cost_after_subsidy=cost_after_subsidy,
+        total_hours=total_hours,
+        training_commitment=training_commitment,
+        conducted_in=conducted_in,
+        description=description,
+        skills_covered=skills_covered,
+        prerequisites=prerequisites,
+        modality=modality,
+        schedule=schedule,
+        skillsfuture_eligible=skillsfuture_eligible
+    )
+
+
+# ============================================================================
+# CONVENIENCE WRAPPER FOR END-TO-END PIPELINE
+# ============================================================================
+
+def run_recommendation_pipeline(
+    stage2_json: Dict[str, Any],
+    user_profile: UserProfile,
+    output_json_path: Optional[str] = None
+) -> LearningPath:
+    """
+    End-to-end pipeline: Stage 2 JSON -> Stage 3 Recommendations.
+    
+    NOTE: No longer requires course_catalog parameter.
+    The recommender handles course discovery internally.
+    """
+    target_role, skill_gaps = parse_stage2_json(stage2_json)
+    
+    # Update user profile with target role from Stage 2
+    user_profile.target_role = target_role
+    
+    recommender = CourseRecommender()
+    learning_path = recommender.recommend(user_profile, skill_gaps)
+    
+    if output_json_path:
+        save_learning_path_to_json(learning_path, output_json_path)
+    
+    return learning_path
+
+
+def run_multi_role_recommendation_pipeline(
+    all_role_results: List[Dict[str, Any]],
+    user_profile: UserProfile,
+    output_dir: Optional[str] = None
+) -> Dict[str, LearningPath]:
+    """
+    End-to-end multi-role pipeline.
+    
+    NOTE: No longer requires loading courses manually.
+    The recommender handles course discovery internally.
+    """
+    role_data_map = parse_stage2_multi_role_json(all_role_results)
+    
+    logger.info(f"Generating recommendations for {len(role_data_map)} roles")
+    
+    learning_paths = {}
+    
+    for target_role, skill_gaps in role_data_map.items():
+        logger.info(f"Processing: {target_role}")
+        
+        role_profile = UserProfile(
+            user_id=user_profile.user_id,
+            current_role=user_profile.current_role,
+            target_role=target_role,
+            current_skills=user_profile.current_skills,
+            budget=user_profile.budget,
+            available_hours_per_week=user_profile.available_hours_per_week,
+            preferred_modality=user_profile.preferred_modality,
+            preferred_schedule=user_profile.preferred_schedule,
+            skillsfuture_eligible=user_profile.skillsfuture_eligible,
+            preferred_providers=user_profile.preferred_providers,
+            preferred_duration_weeks=user_profile.preferred_duration_weeks
+        )
+        
+        recommender = CourseRecommender()
+        learning_path = recommender.recommend(role_profile, skill_gaps)
+        
+        learning_paths[target_role] = learning_path
+        
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            safe_role_name = target_role.lower().replace(' ', '_').replace('/', '_')
+            output_path = os.path.join(output_dir, f"{safe_role_name}.json")
+            save_learning_path_to_json(learning_path, output_path)
+        
+        logger.info(f"Generated {learning_path.total_courses} course recommendations")
+        logger.info(f"Total cost: ${learning_path.total_cost:.2f} -> ${learning_path.total_cost_after_subsidy:.2f}")
+    
+    logger.info(f"Completed recommendations for {len(learning_paths)} roles")
+    
+    return learning_paths
+
+
+# ============================================================================
+# UTILITY FUNCTIONS FOR OUTPUT
+# ============================================================================
+
+def print_learning_path_summary(learning_path: LearningPath):
+    """Pretty-print learning path summary to console"""
+    print("=" * 70)
+    print("STAGE 3: COURSE RECOMMENDATION SYSTEM - LEARNING PATH")
+    print("=" * 70)
+    print()
+    print(f"User ID: {learning_path.user_id}")
+    print(f"Generated: {learning_path.generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+    
+    print("📊 SUMMARY")
+    print(f"  • Total Courses: {learning_path.total_courses}")
+    print(f"  • Total Duration: {learning_path.total_duration_weeks} weeks (~{learning_path.total_duration_weeks//4} months)")
+    print(f"  • Total Cost: ${learning_path.total_cost:.2f} SGD")
+    print(f"  • Cost After Subsidy: ${learning_path.total_cost_after_subsidy:.2f} SGD")
+    savings = learning_path.total_cost - learning_path.total_cost_after_subsidy
+    savings_pct = (savings / learning_path.total_cost * 100) if learning_path.total_cost > 0 else 0
+    print(f"  • Total Savings: ${savings:.2f} SGD ({savings_pct:.1f}%)")
+    print()
+    
+    print("💡 CBR INSIGHT")
+    print(f"  {learning_path.cbr_insight}")
+    print()
+    
+    print("📚 RECOMMENDED COURSES")
+    print("=" * 70)
+    print()
+    
+    for rc in learning_path.courses:
+        print(f"{rc.rank}. {rc.course.title}")
+        print(f"   Provider: {rc.course.provider}")
+        print(f"   Timeline: {rc.sequence_position}")
+        print(f"   Duration: {rc.course.duration_weeks} weeks")
+        print(f"   Cost: ${rc.course.cost:.2f} -> ${rc.course.cost_after_subsidy:.2f} (save ${rc.course.cost - rc.course.cost_after_subsidy:.2f})")
+        print(f"   Modality: {rc.course.modality or 'Flexible'} | Schedule: {rc.course.schedule or 'Flexible'}")
+        print(f"   Rating: {rc.course.rating}/5.0 ⭐ ({rc.course.enrollment_count} enrolled)")
+        
+        skills_display = rc.course.skills_covered[:100] + "..." if rc.course.skills_covered and len(rc.course.skills_covered) > 100 else rc.course.skills_covered or "N/A"
+        print(f"   Skills: {skills_display}")
+        
+        if rc.course.prerequisites:
+            prereq_display = rc.course.prerequisites[:100] + "..." if len(rc.course.prerequisites) > 100 else rc.course.prerequisites
+            print(f"   Prerequisites: {prereq_display}")
+        print()
+        
+        print(f"   📈 SCORES")
+        print(f"      Final Score: {rc.final_score:.3f}")
+        print(f"      ├─ Relevance: {rc.score_breakdown.relevance:.3f}")
+        print(f"      ├─ Rating: {rc.score_breakdown.rating:.3f}")
+        print(f"      ├─ Constraints: {rc.score_breakdown.constraint_fit:.3f}")
+        print(f"      ├─ CBR: {rc.score_breakdown.cbr:.3f}")
+        print(f"      └─ Popularity: {rc.score_breakdown.popularity:.3f}")
+        print("   " + "-" * 68)
+        print()
+    
+    print("=" * 70)
+    print()

@@ -1,0 +1,191 @@
+{
+  "user_id": "user_DE_789",
+  "generated_at": "2026-04-12T12:00:00.424960",
+  "summary": {
+    "total_courses": 4,
+    "total_duration_weeks": 32,
+    "total_cost_sgd": 10400.0,
+    "total_cost_after_subsidy_sgd": 3580.0,
+    "total_savings_sgd": 6820.0,
+    "subsidy_rate": 0.656
+  },
+  "cbr_insight": "No similar historical profiles found.",
+  "trade_offs": [],
+  "recommended_courses": [
+    {
+      "rank": 1,
+      "sequence_position": "Month 1-2",
+      "course": {
+        "course_id": "SF-CLOUD-004",
+        "title": "Cloud Data Engineering on AWS",
+        "provider": "Coursera",
+        "duration_weeks": 8,
+        "cost_sgd": 2400.0,
+        "cost_after_subsidy_sgd": 960.0,
+        "subsidy_rate": 0.6,
+        "savings_sgd": 1440.0,
+        "modality": "online",
+        "schedule": "weekend",
+        "skills_covered": [
+          "cloud platforms",
+          "aws",
+          "s3",
+          "redshift"
+        ],
+        "prerequisites": [],
+        "rating": 4.8,
+        "enrollment_count": 1100,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6545,
+        "score_breakdown": {
+          "relevance": 0.25,
+          "rating": 0.96,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 1.0
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.25,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 2,
+      "sequence_position": "Month 3-5",
+      "course": {
+        "course_id": "SF-SPARK-001",
+        "title": "Apache Spark for Big Data Processing",
+        "provider": "Singapore Polytechnic",
+        "duration_weeks": 10,
+        "cost_sgd": 3200.0,
+        "cost_after_subsidy_sgd": 960.0,
+        "subsidy_rate": 0.7,
+        "savings_sgd": 2240.0,
+        "modality": "online",
+        "schedule": "weekend",
+        "skills_covered": [
+          "apache spark",
+          "pyspark",
+          "big data"
+        ],
+        "prerequisites": [],
+        "rating": 4.7,
+        "enrollment_count": 980,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6396,
+        "score_breakdown": {
+          "relevance": 0.25,
+          "rating": 0.94,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.8909
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.25,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 3,
+      "sequence_position": "Month 5-6",
+      "course": {
+        "course_id": "SF-ETL-003",
+        "title": "ETL Pipeline Design and Development",
+        "provider": "Coursera",
+        "duration_weeks": 6,
+        "cost_sgd": 2200.0,
+        "cost_after_subsidy_sgd": 880.0,
+        "subsidy_rate": 0.6,
+        "savings_sgd": 1320.0,
+        "modality": "online",
+        "schedule": "flexible",
+        "skills_covered": [
+          "etl pipelines",
+          "data integration",
+          "apache spark"
+        ],
+        "prerequisites": [
+          "SF-SPARK-001"
+        ],
+        "rating": 4.5,
+        "enrollment_count": 620,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6864,
+        "score_breakdown": {
+          "relevance": 0.5,
+          "rating": 0.9,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.5636
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.5,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 4,
+      "sequence_position": "Month 7-8",
+      "course": {
+        "course_id": "SF-DW-002",
+        "title": "Data Warehousing Fundamentals",
+        "provider": "National University of Singapore",
+        "duration_weeks": 8,
+        "cost_sgd": 2600.0,
+        "cost_after_subsidy_sgd": 780.0,
+        "subsidy_rate": 0.7,
+        "savings_sgd": 1820.0,
+        "modality": "online",
+        "schedule": "weekend",
+        "skills_covered": [
+          "data warehousing",
+          "dimensional modeling",
+          "sql"
+        ],
+        "prerequisites": [],
+        "rating": 4.6,
+        "enrollment_count": 750,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6147,
+        "score_breakdown": {
+          "relevance": 0.25,
+          "rating": 0.92,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.6818
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.25,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    }
+  ]
+}

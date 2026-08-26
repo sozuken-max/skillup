@@ -1,0 +1,195 @@
+{
+  "user_id": "user_12345",
+  "generated_at": "2026-04-12T11:57:12.503299",
+  "summary": {
+    "total_courses": 4,
+    "total_duration_weeks": 36,
+    "total_cost_sgd": 9000.0,
+    "total_cost_after_subsidy_sgd": 3080.0,
+    "total_savings_sgd": 5920.0,
+    "subsidy_rate": 0.658
+  },
+  "cbr_insight": "No similar historical profiles found.",
+  "trade_offs": [],
+  "recommended_courses": [
+    {
+      "rank": 1,
+      "sequence_position": "Month 1-3",
+      "course": {
+        "course_id": "SF-DL-001",
+        "title": "Deep Learning Fundamentals with TensorFlow",
+        "provider": "National University of Singapore",
+        "duration_weeks": 12,
+        "cost_sgd": 2800.0,
+        "cost_after_subsidy_sgd": 840.0,
+        "subsidy_rate": 0.7,
+        "savings_sgd": 1960.0,
+        "modality": "online",
+        "schedule": "evening",
+        "skills_covered": [
+          "deep learning",
+          "tensorflow",
+          "neural networks"
+        ],
+        "prerequisites": [],
+        "rating": 4.8,
+        "enrollment_count": 1250,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.707,
+        "score_breakdown": {
+          "relevance": 0.4,
+          "rating": 0.96,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 1.0
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.4,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 2,
+      "sequence_position": "Month 4-6",
+      "course": {
+        "course_id": "SF-CV-002",
+        "title": "Computer Vision with Deep Learning",
+        "provider": "National University of Singapore",
+        "duration_weeks": 10,
+        "cost_sgd": 2400.0,
+        "cost_after_subsidy_sgd": 720.0,
+        "subsidy_rate": 0.7,
+        "savings_sgd": 1680.0,
+        "modality": "online",
+        "schedule": "evening",
+        "skills_covered": [
+          "computer vision",
+          "deep learning",
+          "opencv"
+        ],
+        "prerequisites": [
+          "SF-DL-001"
+        ],
+        "rating": 4.7,
+        "enrollment_count": 890,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6742,
+        "score_breakdown": {
+          "relevance": 0.4,
+          "rating": 0.94,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.712
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.4,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 3,
+      "sequence_position": "Month 6-8",
+      "course": {
+        "course_id": "SF-NLP-003",
+        "title": "Natural Language Processing with Transformers",
+        "provider": "Coursera",
+        "duration_weeks": 8,
+        "cost_sgd": 2000.0,
+        "cost_after_subsidy_sgd": 800.0,
+        "subsidy_rate": 0.6,
+        "savings_sgd": 1200.0,
+        "modality": "online",
+        "schedule": "flexible",
+        "skills_covered": [
+          "natural language processing",
+          "tensorflow",
+          "transformers"
+        ],
+        "prerequisites": [
+          "SF-DL-001"
+        ],
+        "rating": 4.6,
+        "enrollment_count": 750,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.659,
+        "score_breakdown": {
+          "relevance": 0.4,
+          "rating": 0.92,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.6
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.4,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    },
+    {
+      "rank": 4,
+      "sequence_position": "Month 8-9",
+      "course": {
+        "course_id": "SF-MLOPS-004",
+        "title": "MLOps: Production Machine Learning",
+        "provider": "Coursera",
+        "duration_weeks": 6,
+        "cost_sgd": 1800.0,
+        "cost_after_subsidy_sgd": 720.0,
+        "subsidy_rate": 0.6,
+        "savings_sgd": 1080.0,
+        "modality": "online",
+        "schedule": "weekend",
+        "skills_covered": [
+          "mlops",
+          "kubernetes",
+          "tensorflow",
+          "docker"
+        ],
+        "prerequisites": [
+          "SF-DL-001"
+        ],
+        "rating": 4.5,
+        "enrollment_count": 620,
+        "skillsfuture_eligible": true,
+        "estimated_hours_per_week": 10.0
+      },
+      "scores": {
+        "final_score": 0.6446,
+        "score_breakdown": {
+          "relevance": 0.4,
+          "rating": 0.9,
+          "constraint_fit": 1.0,
+          "cbr_similarity": 0.5,
+          "popularity": 0.496
+        },
+        "fuzzy_logic_scores": {
+          "budget_fitness": 1.0,
+          "time_fitness": 1.0,
+          "skill_relevance": 0.4,
+          "modality_match": 1.0
+        }
+      },
+      "warnings": []
+    }
+  ]
+}
