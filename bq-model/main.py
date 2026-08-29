@@ -73,21 +73,31 @@ def get_openai_client():
 # These take plain inputs and return plain outputs, with no client creation
 # and no network calls. This is what unit tests target directly.
 
-def build_sql_prompt(question: str, schema: str, full_table: str = FULL_TABLE, max_rows: int = MAX_ROWS_RETURNED) -> str:
+def build_sql_prompt(question: str, schema: str, full_table: str = FULL_TABLE, max_rows: int = MAX_ROWS_RETURNED, broaden: bool = False) -> str:
+    broaden_instruction = ""
+    if broaden:
+        broaden_instruction = """
+IMPORTANT: A previous, more specific version of this query returned zero rows.
+Write a broader query this time:
+- Use LIKE '%keyword%' instead of exact equality for any name, title, or category match.
+- Match on partial keywords rather than the full phrase (e.g. for "data scientist", also consider matching just "data" or "scientist" separately with OR).
+- Drop the least essential filter condition if the question has more than one (keep the one most central to the question).
+"""
+
     return f"""You write BigQuery Standard SQL queries.
 
 Table: {full_table}
 
 Schema:
 {schema}
-
+{broaden_instruction}
 Rules:
 - Return ONLY the SQL query, no explanation, no markdown code fences.
 - Use only SELECT statements. Never write INSERT, UPDATE, DELETE, DROP, MERGE, or DDL of any kind.
 - Select only the specific columns needed to answer the question. Never use SELECT *.
 - Always include a LIMIT clause, maximum {max_rows} rows, unless the question asks for a count or aggregate.
 - Reference the table using its fully qualified name exactly as given above.
-- If the question mentions a company name, match it case-insensitively, e.g. using LOWER(column) = LOWER('value') or LOWER(column) LIKE LOWER('%value%').
+- For company names, job titles, and any other free-text fields, always use LOWER(column) LIKE LOWER('%value%'). Never use exact equality (=) for text fields, since real-world data has inconsistent naming, abbreviations, and suffixes (e.g. "TikTok" may be stored as "TikTok Pte. Ltd." or "ByteDance").
 - If the question is vague or does not specify what to look for, select a small number of representative rows (5-10) with only the most relevant columns, rather than the full table.
 
 Question: {question}
@@ -133,12 +143,12 @@ def get_table_schema() -> str:
     return format_schema_from_fields(table.schema)
 
 
-def generate_sql(question: str, schema: str) -> str:
+def generate_sql(question: str, schema: str, broaden: bool = False) -> str:
     response = get_openai_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "You are a precise SQL generator. Output only valid BigQuery Standard SQL, nothing else."},
-            {"role": "user", "content": build_sql_prompt(question, schema)},
+            {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden)},
         ],
         temperature=0,
     )
@@ -200,7 +210,24 @@ def query():
         sql = generate_sql(question, schema)
         validate_sql_is_read_only(sql)
         rows = run_query(sql)
+
+        # If the specific query found nothing, automatically retry once with a
+        # broader query rather than reporting "no data" on what may just be a
+        # too-narrow match (e.g. exact company name mismatch).
+        broadened = False
+        if not rows:
+            logger.info("Initial query returned 0 rows, retrying with a broadened query")
+            sql_broad = generate_sql(question, schema, broaden=True)
+            validate_sql_is_read_only(sql_broad)
+            rows_broad = run_query(sql_broad)
+            if rows_broad:
+                sql = sql_broad
+                rows = rows_broad
+                broadened = True
+
         answer = summarize_results(question, sql, rows)
+        if broadened:
+            answer += "\n\n*Note: no exact match was found, so this used a broader search.*"
 
         return jsonify({
             "question": question,
@@ -208,6 +235,7 @@ def query():
             "row_count": len(rows),
             "rows": rows[:MAX_ROWS_RETURNED],
             "answer": answer,
+            "broadened": broadened,
         })
 
     except ValueError as e:
