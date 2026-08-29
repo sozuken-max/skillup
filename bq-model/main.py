@@ -19,6 +19,7 @@ TABLE_ID = os.environ["BQ_TABLE_ID"]              # e.g. "mcf_jobs"
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 MAX_ROWS_RETURNED = int(os.environ.get("MAX_ROWS_RETURNED", "200"))
+API_SHARED_SECRET = os.environ.get("API_SHARED_SECRET", "")
 
 bq_client = bigquery.Client(project=PROJECT_ID)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -105,6 +106,11 @@ def summarize_results(question: str, sql: str, rows: list[dict]) -> str:
 
 @app.route("/query", methods=["POST"])
 def query():
+    provided_key = request.headers.get("X-Api-Key", "")
+    if not API_SHARED_SECRET or provided_key != API_SHARED_SECRET:
+        logger.warning("Rejected request with invalid or missing API key")
+        return jsonify({"error": "Unauthorized"}), 401
+
     body = request.get_json(silent=True) or {}
     question = body.get("question", "").strip()
 
