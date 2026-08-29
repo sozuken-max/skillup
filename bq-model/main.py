@@ -84,9 +84,11 @@ Schema:
 Rules:
 - Return ONLY the SQL query, no explanation, no markdown code fences.
 - Use only SELECT statements. Never write INSERT, UPDATE, DELETE, DROP, MERGE, or DDL of any kind.
+- Select only the specific columns needed to answer the question. Never use SELECT *.
 - Always include a LIMIT clause, maximum {max_rows} rows, unless the question asks for a count or aggregate.
 - Reference the table using its fully qualified name exactly as given above.
 - If the question mentions a company name, match it case-insensitively, e.g. using LOWER(column) = LOWER('value') or LOWER(column) LIKE LOWER('%value%').
+- If the question is vague or does not specify what to look for, select a small number of representative rows (5-10) with only the most relevant columns, rather than the full table.
 
 Question: {question}
 
@@ -149,13 +151,28 @@ def run_query(sql: str) -> list[dict]:
     return [dict(row) for row in results]
 
 
+def truncate_row_values(row: dict, max_chars: int = 300) -> dict:
+    """Caps any single field's string length before sending rows to the LLM.
+    Prevents one verbose text column (e.g. a long pipe-separated skills list)
+    from consuming a disproportionate share of the token budget."""
+    truncated = {}
+    for key, value in row.items():
+        if isinstance(value, str) and len(value) > max_chars:
+            truncated[key] = value[:max_chars] + "... [truncated]"
+        else:
+            truncated[key] = value
+    return truncated
+
+
 def summarize_results(question: str, sql: str, rows: list[dict]) -> str:
-    sample = rows[:50]
+    # Cap both row count and per-field length, since a single row with several
+    # verbose text columns can be as large as tens of ordinary rows.
+    sample = [truncate_row_values(row) for row in rows[:10]]
     response = get_openai_client().chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": "You answer questions using only the query results provided. Be concise and factual. If the results are empty, say so plainly."},
-            {"role": "user", "content": f"Question: {question}\n\nSQL used: {sql}\n\nResults ({len(rows)} row(s), showing up to 50):\n{json.dumps(sample, default=str, indent=2)}\n\nAnswer the question in plain language."},
+            {"role": "user", "content": f"Question: {question}\n\nSQL used: {sql}\n\nResults ({len(rows)} row(s) total, showing up to 10, long text fields truncated):\n{json.dumps(sample, default=str, indent=2)}\n\nAnswer the question in plain language."},
         ],
         temperature=0,
     )
