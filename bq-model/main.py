@@ -159,12 +159,21 @@ SQL query or {REPLY_PREFIX}:"""
 
 
 def clean_sql_response(raw_sql: str) -> str:
-    """Strip markdown fences if the model adds them despite instructions."""
+    """Strip markdown fences and any leading comment/blank lines the model
+    adds despite being told not to explain itself. Without this, a stray
+    leading "-- comment" line makes validate_sql_is_read_only's startswith
+    check fail deterministically (same input, same output at temperature=0),
+    so a client-side retry alone would never recover from it."""
     sql = raw_sql.strip()
     if sql.startswith("```"):
         sql = sql.strip("`")
         sql = sql.replace("sql\n", "", 1) if sql.lower().startswith("sql\n") else sql
-    return sql.strip()
+    sql = sql.strip()
+
+    lines = sql.split("\n")
+    while lines and (not lines[0].strip() or lines[0].strip().startswith("--")):
+        lines.pop(0)
+    return "\n".join(lines).strip()
 
 
 def validate_sql_is_read_only(sql: str) -> None:
