@@ -78,7 +78,30 @@ def get_openai_client():
 # These take plain inputs and return plain outputs, with no client creation
 # and no network calls. This is what unit tests target directly.
 
-def build_sql_prompt(question: str, schema: str, full_table: str = FULL_TABLE, max_rows: int = MAX_ROWS_RETURNED, broaden: bool = False) -> str:
+def format_history_block(history: list[dict] | None, max_messages: int = 12, max_chars_per_message: int = 800) -> str:
+    """Renders prior conversation turns as a text block for prompt context.
+    Applies its own caps regardless of what the caller already trimmed to,
+    since a verbose front-end message (e.g. one containing a prior SQL
+    block) could otherwise dominate the prompt's token budget."""
+    if not history:
+        return ""
+    lines = []
+    for turn in history[-max_messages:]:
+        if not isinstance(turn, dict):
+            continue
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > max_chars_per_message:
+            content = content[:max_chars_per_message] + "... [truncated]"
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        lines.append(f"{role}: {content}")
+    if not lines:
+        return ""
+    return "Conversation so far (most recent last):\n" + "\n".join(lines) + "\n\n"
+
+
+def build_sql_prompt(question: str, schema: str, full_table: str = FULL_TABLE, max_rows: int = MAX_ROWS_RETURNED, broaden: bool = False, history: list[dict] | None = None) -> str:
     broaden_instruction = ""
     if broaden:
         broaden_instruction = """
@@ -89,6 +112,8 @@ Write a broader query this time:
 - Drop the least essential filter condition if the question has more than one (keep the one most central to the question).
 """
 
+    history_block = format_history_block(history)
+
     return f"""You write BigQuery Standard SQL queries.
 
 Table: {full_table}
@@ -96,7 +121,7 @@ Table: {full_table}
 Schema:
 {schema}
 {broaden_instruction}
-Rules:
+{history_block}Rules:
 - Return ONLY the SQL query, no explanation, no markdown code fences.
 - Use only SELECT statements. Never write INSERT, UPDATE, DELETE, DROP, MERGE, or DDL of any kind.
 - Select only the specific columns needed to answer the question. Never use SELECT *.
@@ -104,6 +129,7 @@ Rules:
 - Reference the table using its fully qualified name exactly as given above.
 - For company names, job titles, and any other free-text fields, always use LOWER(column) LIKE LOWER('%value%'). Never use exact equality (=) for text fields, since real-world data has inconsistent naming, abbreviations, and suffixes (e.g. "TikTok" may be stored as "TikTok Pte. Ltd." or "ByteDance").
 - If the question is vague or does not specify what to look for, select a small number of representative rows (5-10) with only the most relevant columns, rather than the full table.
+- If the question refers back to the conversation above (e.g. "those jobs", "that company", "the same roles"), resolve the reference using the conversation and carry over any filters it implies (e.g. a job title or role type mentioned earlier), unless the new question clearly changes topic.
 
 Question: {question}
 
@@ -148,12 +174,12 @@ def get_table_schema() -> str:
     return format_schema_from_fields(table.schema)
 
 
-def generate_sql(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False) -> str:
+def generate_sql(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False, history: list[dict] | None = None) -> str:
     response = get_openai_client().chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": "You are a precise SQL generator. Output only valid BigQuery Standard SQL, nothing else."},
-            {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden)},
+            {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden, history=history)},
         ],
         temperature=0,
     )
@@ -179,15 +205,16 @@ def truncate_row_values(row: dict, max_chars: int = 300) -> dict:
     return truncated
 
 
-def summarize_results(question: str, sql: str, rows: list[dict], model: str = OPENAI_MODEL) -> str:
+def summarize_results(question: str, sql: str, rows: list[dict], model: str = OPENAI_MODEL, history: list[dict] | None = None) -> str:
     # Cap both row count and per-field length, since a single row with several
     # verbose text columns can be as large as tens of ordinary rows.
     sample = [truncate_row_values(row) for row in rows[:10]]
+    history_block = format_history_block(history)
     response = get_openai_client().chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You answer questions using only the query results provided. Be concise and factual. If the results are empty, say so plainly."},
-            {"role": "user", "content": f"Question: {question}\n\nSQL used: {sql}\n\nResults ({len(rows)} row(s) total, showing up to 10, long text fields truncated):\n{json.dumps(sample, default=str, indent=2)}\n\nAnswer the question in plain language."},
+            {"role": "system", "content": "You answer questions using the query results provided, using the prior conversation only to understand what is being asked (e.g. what \"those\" or \"that\" refers to). Be concise and factual. If the results are empty, say so plainly."},
+            {"role": "user", "content": f"{history_block}Question: {question}\n\nSQL used: {sql}\n\nResults ({len(rows)} row(s) total, showing up to 10, long text fields truncated):\n{json.dumps(sample, default=str, indent=2)}\n\nAnswer the question in plain language."},
         ],
         temperature=0,
     )
@@ -214,6 +241,16 @@ def query():
     question = (body.get("question") or body.get("prompt") or "").strip()
     requested_model = body.get("model") or OPENAI_MODEL
 
+    # app.js sends the same conversation as "history", "messages", and "context"
+    # in different shapes; "history" (a list of {"role", "content"} turns, not
+    # including the current question) is the one we actually use. Sanitized here
+    # rather than trusted as-is, since it comes straight from the client.
+    history = []
+    for turn in (body.get("history") or []):
+        if isinstance(turn, dict) and isinstance(turn.get("content"), str):
+            role = turn.get("role") if turn.get("role") in ("user", "assistant") else "assistant"
+            history.append({"role": role, "content": turn["content"]})
+
     if not question:
         return jsonify({"error": "Request body must include a 'question' field"}), 400
     if requested_model not in ALLOWED_OPENAI_MODELS:
@@ -229,7 +266,7 @@ def query():
         try:
             yield json.dumps({"stage": "generating_sql"}) + "\n"
             schema = get_table_schema()
-            sql = generate_sql(question, schema, model=requested_model)
+            sql = generate_sql(question, schema, model=requested_model, history=history)
             validate_sql_is_read_only(sql)
             yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
 
@@ -243,7 +280,7 @@ def query():
             if not rows:
                 logger.info("Initial query returned 0 rows, retrying with a broadened query")
                 yield json.dumps({"stage": "broadening"}) + "\n"
-                sql_broad = generate_sql(question, schema, model=requested_model, broaden=True)
+                sql_broad = generate_sql(question, schema, model=requested_model, broaden=True, history=history)
                 validate_sql_is_read_only(sql_broad)
                 rows_broad = run_query(sql_broad)
                 if rows_broad:
@@ -253,7 +290,7 @@ def query():
                     yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
 
             yield json.dumps({"stage": "summarizing"}) + "\n"
-            answer = summarize_results(question, sql, rows, model=requested_model)
+            answer = summarize_results(question, sql, rows, model=requested_model, history=history)
             if broadened:
                 answer += "\n\n*Note: no exact match was found, so this used a broader search.*"
 
