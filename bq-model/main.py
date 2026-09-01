@@ -329,8 +329,12 @@ def query():
     return response
 
 
-@app.route("/healthz", methods=["GET"])
-def healthz():
+@app.route("/status", methods=["GET"])
+def status():
+    # Not named /healthz on purpose: Cloud Run's own infrastructure
+    # intercepts requests to that exact path for its internal probing and
+    # never forwards them to this container, so a public health check
+    # against /healthz can never succeed regardless of what this app does.
     return jsonify({"status": "ok"})
 
 
