@@ -2,7 +2,7 @@ import os
 import json
 import logging
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from google.cloud import bigquery
 from openai import OpenAI
 
@@ -45,7 +45,12 @@ TABLE_ID = os.environ.get("BQ_TABLE_ID", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 MAX_ROWS_RETURNED = int(os.environ.get("MAX_ROWS_RETURNED", "200"))
-API_SHARED_SECRET = os.environ.get("API_SHARED_SECRET", "")
+
+# Models the front end is allowed to request via the "model" field.
+# Access control for this endpoint is Origin-based (see query() below), not
+# a shared secret, so this allowlist is what stops an arbitrary/expensive
+# model string from being passed straight through to the OpenAI API.
+ALLOWED_OPENAI_MODELS = {"gpt-4o", "gpt-4o-mini"}
 
 FULL_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
 
@@ -143,9 +148,9 @@ def get_table_schema() -> str:
     return format_schema_from_fields(table.schema)
 
 
-def generate_sql(question: str, schema: str, broaden: bool = False) -> str:
+def generate_sql(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False) -> str:
     response = get_openai_client().chat.completions.create(
-        model=OPENAI_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": "You are a precise SQL generator. Output only valid BigQuery Standard SQL, nothing else."},
             {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden)},
@@ -174,12 +179,12 @@ def truncate_row_values(row: dict, max_chars: int = 300) -> dict:
     return truncated
 
 
-def summarize_results(question: str, sql: str, rows: list[dict]) -> str:
+def summarize_results(question: str, sql: str, rows: list[dict], model: str = OPENAI_MODEL) -> str:
     # Cap both row count and per-field length, since a single row with several
     # verbose text columns can be as large as tens of ordinary rows.
     sample = [truncate_row_values(row) for row in rows[:10]]
     response = get_openai_client().chat.completions.create(
-        model=OPENAI_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": "You answer questions using only the query results provided. Be concise and factual. If the results are empty, say so plainly."},
             {"role": "user", "content": f"Question: {question}\n\nSQL used: {sql}\n\nResults ({len(rows)} row(s) total, showing up to 10, long text fields truncated):\n{json.dumps(sample, default=str, indent=2)}\n\nAnswer the question in plain language."},
@@ -193,57 +198,85 @@ def summarize_results(question: str, sql: str, rows: list[dict]) -> str:
 
 @app.route("/query", methods=["POST"])
 def query():
-    provided_key = request.headers.get("X-Api-Key", "")
-    if not API_SHARED_SECRET or provided_key != API_SHARED_SECRET:
-        logger.warning("Rejected request with invalid or missing API key")
-        return jsonify({"error": "Unauthorized"}), 401
+    # Access control is Origin-based rather than a shared secret: only
+    # requests carrying one of the allowed front-end origins are served.
+    # Note this is enforced the same way the CORS headers above are — it
+    # stops browsers from completing cross-origin calls, but an Origin
+    # header can be forged by a non-browser client. It is not a substitute
+    # for real auth if this endpoint ever needs to resist a targeted caller.
+    origin = request.headers.get("Origin", "")
+    if origin not in ALLOWED_ORIGINS:
+        logger.warning(f"Rejected request from disallowed origin: {origin!r}")
+        return jsonify({"error": "Forbidden"}), 403
 
     body = request.get_json(silent=True) or {}
     # app.js sends both "question" and "prompt" with the same value; accept either.
     question = (body.get("question") or body.get("prompt") or "").strip()
+    requested_model = body.get("model") or OPENAI_MODEL
 
     if not question:
         return jsonify({"error": "Request body must include a 'question' field"}), 400
+    if requested_model not in ALLOWED_OPENAI_MODELS:
+        return jsonify({"error": f"Unsupported model: {requested_model}"}), 400
 
-    try:
-        schema = get_table_schema()
-        sql = generate_sql(question, schema)
-        validate_sql_is_read_only(sql)
-        rows = run_query(sql)
+    def generate_events():
+        # Streamed as newline-delimited JSON so the front end can render
+        # each stage (generating SQL, running it, summarizing) as it
+        # happens instead of waiting on one final response. Because the
+        # HTTP status is already committed to 200 once streaming starts,
+        # failures are reported as a {"stage": "error"} event rather than
+        # an HTTP error status — the front end must check for that stage.
+        try:
+            yield json.dumps({"stage": "generating_sql"}) + "\n"
+            schema = get_table_schema()
+            sql = generate_sql(question, schema, model=requested_model)
+            validate_sql_is_read_only(sql)
+            yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
 
-        # If the specific query found nothing, automatically retry once with a
-        # broader query rather than reporting "no data" on what may just be a
-        # too-narrow match (e.g. exact company name mismatch).
-        broadened = False
-        if not rows:
-            logger.info("Initial query returned 0 rows, retrying with a broadened query")
-            sql_broad = generate_sql(question, schema, broaden=True)
-            validate_sql_is_read_only(sql_broad)
-            rows_broad = run_query(sql_broad)
-            if rows_broad:
-                sql = sql_broad
-                rows = rows_broad
-                broadened = True
+            yield json.dumps({"stage": "running_query"}) + "\n"
+            rows = run_query(sql)
 
-        answer = summarize_results(question, sql, rows)
-        if broadened:
-            answer += "\n\n*Note: no exact match was found, so this used a broader search.*"
+            # If the specific query found nothing, automatically retry once with a
+            # broader query rather than reporting "no data" on what may just be a
+            # too-narrow match (e.g. exact company name mismatch).
+            broadened = False
+            if not rows:
+                logger.info("Initial query returned 0 rows, retrying with a broadened query")
+                yield json.dumps({"stage": "broadening"}) + "\n"
+                sql_broad = generate_sql(question, schema, model=requested_model, broaden=True)
+                validate_sql_is_read_only(sql_broad)
+                rows_broad = run_query(sql_broad)
+                if rows_broad:
+                    sql = sql_broad
+                    rows = rows_broad
+                    broadened = True
+                    yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
 
-        return jsonify({
-            "question": question,
-            "sql": sql,
-            "row_count": len(rows),
-            "rows": rows[:MAX_ROWS_RETURNED],
-            "answer": answer,
-            "broadened": broadened,
-        })
+            yield json.dumps({"stage": "summarizing"}) + "\n"
+            answer = summarize_results(question, sql, rows, model=requested_model)
+            if broadened:
+                answer += "\n\n*Note: no exact match was found, so this used a broader search.*"
 
-    except ValueError as e:
-        logger.warning(f"Rejected query: {e}")
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.exception("Query failed")
-        return jsonify({"error": "Internal error processing query", "detail": str(e)}), 500
+            yield json.dumps({
+                "stage": "done",
+                "question": question,
+                "sql": sql,
+                "row_count": len(rows),
+                "rows": rows[:MAX_ROWS_RETURNED],
+                "answer": answer,
+                "broadened": broadened,
+            }) + "\n"
+
+        except ValueError as e:
+            logger.warning(f"Rejected query: {e}")
+            yield json.dumps({"stage": "error", "error": str(e)}) + "\n"
+        except Exception as e:
+            logger.exception("Query failed")
+            yield json.dumps({"stage": "error", "error": "Internal error processing query", "detail": str(e)}) + "\n"
+
+    response = Response(stream_with_context(generate_events()), mimetype="application/x-ndjson")
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.route("/healthz", methods=["GET"])
