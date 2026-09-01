@@ -54,6 +54,13 @@ MAX_ROWS_RETURNED = int(os.environ.get("MAX_ROWS_RETURNED", "200"))
 # model string from being passed straight through to the OpenAI API.
 ALLOWED_OPENAI_MODELS = {"gpt-4o", "gpt-4o-mini"}
 
+# Prefix the SQL-generation model uses to signal "no query needed, this is
+# the direct reply" instead of SQL. Keeps chit-chat turns (greetings,
+# thanks, reactions to a previous answer) to a single LLM call with no
+# BigQuery round trip, instead of always running the full generate-SQL ->
+# execute -> summarize pipeline regardless of whether the message needs it.
+REPLY_PREFIX = "REPLY:"
+
 FULL_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
 
 # Clients are created lazily, not at import time. This means importing
@@ -123,7 +130,9 @@ Write a broader query this time:
     # conversation history, the question itself) comes last. This ordering
     # lets providers that support prompt caching reuse the static prefix
     # across requests instead of reprocessing it every time.
-    return f"""You write BigQuery Standard SQL queries.
+    return f"""You are Mya, a Singapore job-market assistant backed by a BigQuery jobs table. For each message, first decide whether answering it requires querying that table for factual data (specific numbers, listings, companies, skills, salaries, counts, comparisons). If the message is a greeting, thanks, small talk, a reaction or opinion about something already discussed (e.g. "wow that's high", "nice", "thank you"), a meta question about you as an assistant, or otherwise doesn't need fresh data from the table, do NOT write SQL — respond directly instead by outputting a line starting with `{REPLY_PREFIX}` followed by a short, warm, natural-language reply in your own voice as Mya. When it fits naturally, suggest one or two follow-up questions the user could ask about Singapore's job market (salaries, skills, hiring trends) to keep the conversation useful — but don't force this onto simple greetings or thanks where it would feel out of place.
+
+If a query genuinely IS needed, output ONLY the SQL query as specified in the rules below — no `{REPLY_PREFIX}` prefix, no explanation, no markdown code fences.
 
 Table: {full_table}
 
@@ -146,7 +155,7 @@ Rules:
 {broaden_instruction}
 {history_block}Question: {question}
 
-SQL query:"""
+SQL query or {REPLY_PREFIX}:"""
 
 
 def clean_sql_response(raw_sql: str) -> str:
@@ -187,16 +196,26 @@ def get_table_schema() -> str:
     return format_schema_from_fields(table.schema)
 
 
-def generate_sql(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False, history: list[dict] | None = None) -> str:
+def generate_sql_or_reply(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False, history: list[dict] | None = None) -> tuple[str | None, str | None]:
+    """Returns (sql, direct_reply) with exactly one of the two set.
+
+    A single model call decides whether the question needs a BigQuery query
+    at all before generating anything — this is what lets a message like
+    "Hi there" skip SQL generation, execution, and summarization entirely
+    instead of always running the full three-call pipeline.
+    """
     response = get_openai_client().chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "You are a precise SQL generator. Output only valid BigQuery Standard SQL, nothing else."},
+            {"role": "system", "content": f"You are a precise SQL generator that also knows when SQL isn't needed. Output only valid BigQuery Standard SQL, or a single line starting with '{REPLY_PREFIX}' — nothing else."},
             {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden, history=history)},
         ],
         temperature=0,
     )
-    return clean_sql_response(response.choices[0].message.content)
+    raw = response.choices[0].message.content.strip()
+    if raw[:len(REPLY_PREFIX)].upper() == REPLY_PREFIX.upper():
+        return None, raw[len(REPLY_PREFIX):].strip()
+    return clean_sql_response(raw), None
 
 
 def run_query(sql: str) -> list[dict]:
@@ -279,7 +298,22 @@ def query():
         try:
             yield json.dumps({"stage": "generating_sql"}) + "\n"
             schema = get_table_schema()
-            sql = generate_sql(question, schema, model=requested_model, history=history)
+            sql, direct_reply = generate_sql_or_reply(question, schema, model=requested_model, history=history)
+
+            if direct_reply is not None:
+                # No query needed (greeting, thanks, a reaction to a prior
+                # answer, etc.) — skip BigQuery and summarization entirely.
+                yield json.dumps({
+                    "stage": "done",
+                    "question": question,
+                    "sql": None,
+                    "row_count": 0,
+                    "rows": [],
+                    "answer": direct_reply,
+                    "broadened": False,
+                }) + "\n"
+                return
+
             validate_sql_is_read_only(sql)
             yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
 
@@ -293,14 +327,15 @@ def query():
             if not rows:
                 logger.info("Initial query returned 0 rows, retrying with a broadened query")
                 yield json.dumps({"stage": "broadening"}) + "\n"
-                sql_broad = generate_sql(question, schema, model=requested_model, broaden=True, history=history)
-                validate_sql_is_read_only(sql_broad)
-                rows_broad = run_query(sql_broad)
-                if rows_broad:
-                    sql = sql_broad
-                    rows = rows_broad
-                    broadened = True
-                    yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
+                sql_broad, _ = generate_sql_or_reply(question, schema, model=requested_model, broaden=True, history=history)
+                if sql_broad:
+                    validate_sql_is_read_only(sql_broad)
+                    rows_broad = run_query(sql_broad)
+                    if rows_broad:
+                        sql = sql_broad
+                        rows = rows_broad
+                        broadened = True
+                        yield json.dumps({"stage": "sql_generated", "sql": sql}) + "\n"
 
             yield json.dumps({"stage": "summarizing"}) + "\n"
             answer = summarize_results(question, sql, rows, model=requested_model, history=history)
