@@ -6,6 +6,8 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from google.cloud import bigquery
 from openai import OpenAI
 
+from schema_glossary import format_column_notes, format_few_shot_examples
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -113,15 +115,26 @@ Write a broader query this time:
 """
 
     history_block = format_history_block(history)
+    column_notes = format_column_notes()
+    few_shot_examples = format_few_shot_examples(full_table)
 
+    # Static content (schema, column notes, examples, rules) comes first and
+    # is identical across requests; dynamic content (broaden retry flag,
+    # conversation history, the question itself) comes last. This ordering
+    # lets providers that support prompt caching reuse the static prefix
+    # across requests instead of reprocessing it every time.
     return f"""You write BigQuery Standard SQL queries.
 
 Table: {full_table}
 
 Schema:
 {schema}
-{broaden_instruction}
-{history_block}Rules:
+
+{column_notes}
+
+{few_shot_examples}
+
+Rules:
 - Return ONLY the SQL query, no explanation, no markdown code fences.
 - Use only SELECT statements. Never write INSERT, UPDATE, DELETE, DROP, MERGE, or DDL of any kind.
 - Select only the specific columns needed to answer the question. Never use SELECT *.
@@ -129,10 +142,9 @@ Schema:
 - Reference the table using its fully qualified name exactly as given above.
 - For company names, job titles, and any other free-text fields, always use LOWER(column) LIKE LOWER('%value%'). Never use exact equality (=) for text fields, since real-world data has inconsistent naming, abbreviations, and suffixes (e.g. "TikTok" may be stored as "TikTok Pte. Ltd." or "ByteDance").
 - If the question is vague or does not specify what to look for, select a small number of representative rows (5-10) with only the most relevant columns, rather than the full table.
-- If the question refers back to the conversation above (e.g. "those jobs", "that company", "the same roles"), resolve the reference using the conversation and carry over any filters it implies (e.g. a job title or role type mentioned earlier), unless the new question clearly changes topic.
-- This table contains only job postings from Singapore's MyCareersFuture portal — every row is already a Singapore job. Never add a filter like `LOWER(region) LIKE LOWER('%singapore%')` (or the same on any other column) just because the question mentions Singapore generically; a column's values are not guaranteed to contain the literal word "Singapore" even when it is a location column. Only filter on a location/region column when the question names something more specific than "Singapore" itself (e.g. a district, an area, "remote", "onsite").
-
-Question: {question}
+- If the question refers back to the conversation history provided (e.g. "those jobs", "that company", "the same roles"), resolve the reference using it and carry over any filters it implies (e.g. a job title or role type mentioned earlier), unless the new question clearly changes topic.
+{broaden_instruction}
+{history_block}Question: {question}
 
 SQL query:"""
 
