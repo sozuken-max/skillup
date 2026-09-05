@@ -2,7 +2,6 @@ import os
 import json
 import logging
 
-import numpy as np
 from flask import Flask, request, jsonify, Response, stream_with_context
 from google.cloud import bigquery
 from openai import OpenAI
@@ -64,41 +63,10 @@ REPLY_PREFIX = "REPLY:"
 
 FULL_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
 
-# --- SEMANTIC ROLE-TITLE SEARCH ---
-# `title` in the jobs table is free-text scraped from job posts, so a user
-# asking for e.g. "data science engineer" can get zero rows via LIKE even
-# though the dataset only ever uses a different exact phrase for that role.
-# This table holds one pre-computed embedding per canonical role title
-# (all-MiniLM-L6-v2, 384-dim, L2-normalized); we embed the user's phrase the
-# same way and rank by cosine similarity (a dot product, since both sides are
-# normalized) instead of relying on the SQL-generation model to guess the
-# dataset's exact wording.
-#
-# Embedding runs through fastembed's ONNX export of this model rather than
-# the original sentence-transformers/PyTorch one. Same weights and tokenizer,
-# so the vectors it produces are compatible with the ones already stored in
-# the table (nearest-neighbour ranking is unaffected by the runtime swap),
-# but without pulling in torch — cuts several hundred MB and a slower import
-# off the image for a single small ONNX model.
-ROLE_EMBEDDINGS_TABLE = os.environ.get(
-    "ROLE_EMBEDDINGS_TABLE", "skillup-506706.databricks_mcf_jobs.mcf_role_embeddings"
-)
-EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
-# Must match the cache_dir the Dockerfile pre-downloads the model weights into
-# at build time (see get_embedding_model() below) — otherwise the first
-# semantic-search request on a fresh container fetches ~80MB from Hugging
-# Face over the network inside the request itself, which is slow enough to
-# blow through the request timeout on its own.
-EMBEDDING_CACHE_DIR = os.environ.get("EMBEDDING_CACHE_DIR", "/app/model_cache")
-EMBEDDING_DIMS = 384
-SEMANTIC_TOP_K = 5
-
 # Clients are created lazily, not at import time. This means importing
 # main.py in a test file no longer requires real credentials or env vars.
 _bq_client = None
 _openai_client = None
-_embedding_model = None
-_role_embeddings_cache = None  # (meta: list[dict], matrix: np.ndarray), see get_role_embeddings()
 
 
 def get_bq_client():
@@ -113,45 +81,6 @@ def get_openai_client():
     if _openai_client is None:
         _openai_client = OpenAI(api_key=OPENAI_API_KEY)
     return _openai_client
-
-
-def get_embedding_model():
-    """Loads the ONNX-runtime embedding model from the local cache the
-    Dockerfile pre-populated at build time (see EMBEDDING_CACHE_DIR) — no
-    network call at request time. Import is inside the function rather than
-    at module level purely so a process that never needs semantic search
-    doesn't pay for importing fastembed."""
-    global _embedding_model
-    if _embedding_model is None:
-        from fastembed import TextEmbedding
-        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, cache_dir=EMBEDDING_CACHE_DIR)
-    return _embedding_model
-
-
-def get_role_embeddings():
-    """Fetches and caches the full role-embeddings table in memory (a few
-    thousand rows x 384 floats - a few MB), so each semantic search after the
-    first is a local numpy operation rather than a fresh BigQuery round trip."""
-    global _role_embeddings_cache
-    if _role_embeddings_cache is None:
-        dim_cols = ", ".join(f"dim_{i}" for i in range(EMBEDDING_DIMS))
-        query = f"SELECT title, primary_category, job_count, context_text, {dim_cols} FROM `{ROLE_EMBEDDINGS_TABLE}`"
-        rows = list(get_bq_client().query(query).result())
-        meta = [
-            {
-                "title": row["title"],
-                "primary_category": row["primary_category"],
-                "job_count": row["job_count"],
-                "context_text": row["context_text"],
-            }
-            for row in rows
-        ]
-        matrix = np.array(
-            [[row[f"dim_{i}"] for i in range(EMBEDDING_DIMS)] for row in rows],
-            dtype=np.float32,
-        )
-        _role_embeddings_cache = (meta, matrix)
-    return _role_embeddings_cache
 
 
 # --- PURE / TESTABLE FUNCTIONS ---
@@ -181,17 +110,7 @@ def format_history_block(history: list[dict] | None, max_messages: int = 12, max
     return "Conversation so far (most recent last):\n" + "\n".join(lines) + "\n\n"
 
 
-def top_k_similar(query_vector: np.ndarray, matrix: np.ndarray, meta: list[dict], k: int = SEMANTIC_TOP_K) -> list[dict]:
-    """Returns the k entries of `meta` whose embedding row is most similar to
-    query_vector, each annotated with a "score" (cosine similarity). Both
-    query_vector and the rows of matrix are assumed L2-normalized already, so
-    similarity is a plain dot product rather than needing norms divided out."""
-    scores = matrix @ query_vector
-    top_indices = np.argsort(scores)[::-1][:k]
-    return [{**meta[i], "score": float(scores[i])} for i in top_indices]
-
-
-def build_sql_prompt(question: str, schema: str, full_table: str = FULL_TABLE, max_rows: int = MAX_ROWS_RETURNED, broaden: bool = False, history: list[dict] | None = None, resolved_titles: list[str] | None = None) -> str:
+def build_sql_prompt(question: str, schema: str, full_table: str = FULL_TABLE, max_rows: int = MAX_ROWS_RETURNED, broaden: bool = False, history: list[dict] | None = None) -> str:
     broaden_instruction = ""
     if broaden:
         broaden_instruction = """
@@ -200,15 +119,6 @@ Write a broader query this time:
 - Use LIKE '%keyword%' instead of exact equality for any name, title, or category match.
 - Match on partial keywords rather than the full phrase (e.g. for "data scientist", also consider matching just "data" or "scientist" separately with OR).
 - Drop the least essential filter condition if the question has more than one (keep the one most central to the question).
-"""
-
-    resolved_titles_instruction = ""
-    if resolved_titles:
-        titles_list = "\n".join(f'  - "{t}"' for t in resolved_titles)
-        resolved_titles_instruction = f"""
-IMPORTANT: A semantic search has already resolved the role the user is asking about to these exact title(s) as they appear in the data:
-{titles_list}
-Build the title filter using ONLY these exact title(s) — LOWER(title) LIKE LOWER('%<title>%') for each, combined with OR if there is more than one — instead of the user's own phrasing.
 """
 
     history_block = format_history_block(history)
@@ -242,7 +152,7 @@ Rules:
 - For company names, job titles, and any other free-text fields, always use LOWER(column) LIKE LOWER('%value%'). Never use exact equality (=) for text fields, since real-world data has inconsistent naming, abbreviations, and suffixes (e.g. "TikTok" may be stored as "TikTok Pte. Ltd." or "ByteDance").
 - If the question is vague or does not specify what to look for, select a small number of representative rows (5-10) with only the most relevant columns, rather than the full table.
 - If the question refers back to the conversation history provided (e.g. "those jobs", "that company", "the same roles"), resolve the reference using it and carry over any filters it implies (e.g. a job title or role type mentioned earlier), unless the new question clearly changes topic.
-{broaden_instruction}{resolved_titles_instruction}
+{broaden_instruction}
 {history_block}Question: {question}
 
 SQL query or {REPLY_PREFIX}:"""
@@ -295,7 +205,7 @@ def get_table_schema() -> str:
     return format_schema_from_fields(table.schema)
 
 
-def generate_sql_or_reply(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False, history: list[dict] | None = None, resolved_titles: list[str] | None = None) -> tuple[str | None, str | None]:
+def generate_sql_or_reply(question: str, schema: str, model: str = OPENAI_MODEL, broaden: bool = False, history: list[dict] | None = None) -> tuple[str | None, str | None]:
     """Returns (sql, direct_reply) with exactly one of the two set.
 
     A single model call decides whether the question needs a BigQuery query
@@ -307,7 +217,7 @@ def generate_sql_or_reply(question: str, schema: str, model: str = OPENAI_MODEL,
         model=model,
         messages=[
             {"role": "system", "content": f"You are a precise SQL generator that also knows when SQL isn't needed. Output only valid BigQuery Standard SQL, or a single line starting with '{REPLY_PREFIX}' — nothing else."},
-            {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden, history=history, resolved_titles=resolved_titles)},
+            {"role": "user", "content": build_sql_prompt(question, schema, broaden=broaden, history=history)},
         ],
         temperature=0,
     )
@@ -315,78 +225,6 @@ def generate_sql_or_reply(question: str, schema: str, model: str = OPENAI_MODEL,
     if raw[:len(REPLY_PREFIX)].upper() == REPLY_PREFIX.upper():
         return None, raw[len(REPLY_PREFIX):].strip()
     return clean_sql_response(raw), None
-
-
-def extract_job_title_query(question: str, model: str = OPENAI_MODEL, history: list[dict] | None = None) -> str | None:
-    """Asks the LLM whether answering this question requires filtering the
-    jobs table on a specific job title/role, and if so, what that role is.
-    Returns None for questions that don't hinge on a specific title (greetings,
-    aggregate questions about the whole market, questions already resolved by
-    conversation history into something other than a title, etc.) — those skip
-    semantic search entirely and go straight to normal SQL generation."""
-    history_block = format_history_block(history)
-    prompt = f"""{history_block}Question: {question}
-
-Does answering this question require finding jobs with a specific job title or role (e.g. "data science engineer", "product manager")? Only answer yes if the question is about a particular role, not jobs/the market in general. If yes, reply with ONLY that role/title phrase, in plain English, as close to the user's own wording as possible (resolve "those jobs"/"that role" etc. using the conversation above if needed). If no, reply with exactly: NONE"""
-    response = get_openai_client().chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You extract the job title/role a question is asking about, or say NONE. Reply with only the title phrase or the word NONE — nothing else."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-    )
-    raw = response.choices[0].message.content.strip().strip('"')
-    if not raw or raw.upper() == "NONE":
-        return None
-    return raw
-
-
-def semantic_search_titles(phrase: str, k: int = SEMANTIC_TOP_K) -> list[dict]:
-    """Embeds `phrase` with the same model weights used to build the
-    reference table (fastembed returns L2-normalized vectors already), then
-    returns the k most similar canonical role rows."""
-    meta, matrix = get_role_embeddings()
-    query_vector = next(iter(get_embedding_model().embed([phrase])))
-    return top_k_similar(np.asarray(query_vector, dtype=np.float32), matrix, meta, k=k)
-
-
-def rationalize_semantic_matches(question: str, extracted_title: str, candidates: list[dict], model: str = OPENAI_MODEL) -> list[str]:
-    """Given the top-K semantically similar canonical titles, asks the LLM
-    which of them (if any) actually mean the same role the user is asking
-    about — nearest-neighbour by embedding distance is not always a correct
-    match (e.g. "data engineer" and "data science engineer" can rank close
-    together without being interchangeable). Returns the confirmed titles,
-    exactly as given, in the model's stated order of relevance; empty if none
-    of the candidates are a genuine match."""
-    listing = "\n".join(
-        f'{i + 1}. "{c["title"]}" (category: {c["primary_category"]}, {c["job_count"]} jobs) — {c["context_text"]}'
-        for i, c in enumerate(candidates)
-    )
-    prompt = f"""A user asked about the role "{extracted_title}" (from the question: "{question}").
-
-Here are the {len(candidates)} closest canonical role titles found by embedding similarity search:
-{listing}
-
-Which of these titles genuinely refer to the same role the user means? A high similarity score alone isn't proof — only include a title if it is a real match, not just a related-but-different role. Reply with a comma-separated list of the matching titles, copied EXACTLY as given above (same wording and capitalization), in order of relevance. If none of them are a real match, reply with exactly: NONE"""
-    response = get_openai_client().chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You judge whether candidate job titles match a user's intent. Reply with only a comma-separated list of exact matching titles from the list given, or NONE."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-    )
-    raw = response.choices[0].message.content.strip()
-    if not raw or raw.upper() == "NONE":
-        return []
-    candidate_titles = {c["title"] for c in candidates}
-    confirmed = []
-    for part in raw.split(","):
-        title = part.strip().strip('"')
-        if title in candidate_titles and title not in confirmed:
-            confirmed.append(title)
-    return confirmed
 
 
 def run_query(sql: str) -> list[dict]:
@@ -469,38 +307,7 @@ def query():
         try:
             yield json.dumps({"stage": "generating_sql"}) + "\n"
             schema = get_table_schema()
-
-            # Before writing SQL, check whether this question hinges on a
-            # specific job title/role. If so, resolve the user's own phrasing
-            # to the exact title(s) present in the data via embedding
-            # similarity, rather than letting the SQL-generation model guess
-            # the dataset's wording with a LIKE match that may return nothing.
-            resolved_titles = None
-            try:
-                extracted_title = extract_job_title_query(question, model=requested_model, history=history)
-            except Exception:
-                logger.exception("Role-title extraction failed; continuing without semantic search")
-                extracted_title = None
-
-            if extracted_title:
-                yield json.dumps({"stage": "semantic_search", "query_title": extracted_title}) + "\n"
-                try:
-                    candidates = semantic_search_titles(extracted_title)
-                    yield json.dumps({
-                        "stage": "semantic_search_results",
-                        "query_title": extracted_title,
-                        "candidates": [{"title": c["title"], "score": round(c["score"], 4)} for c in candidates],
-                    }) + "\n"
-
-                    confirmed_titles = rationalize_semantic_matches(question, extracted_title, candidates, model=requested_model)
-                    yield json.dumps({"stage": "semantic_search_confirmed", "titles": confirmed_titles}) + "\n"
-                    if confirmed_titles:
-                        resolved_titles = confirmed_titles
-                except Exception as e:
-                    logger.exception("Semantic title search failed; falling back to plain LIKE matching")
-                    yield json.dumps({"stage": "semantic_search_error", "error": str(e)}) + "\n"
-
-            sql, direct_reply = generate_sql_or_reply(question, schema, model=requested_model, history=history, resolved_titles=resolved_titles)
+            sql, direct_reply = generate_sql_or_reply(question, schema, model=requested_model, history=history)
 
             if direct_reply is not None:
                 # No query needed (greeting, thanks, a reaction to a prior
@@ -574,23 +381,6 @@ def status():
     # against /healthz can never succeed regardless of what this app does.
     return jsonify({"status": "ok"})
 
-
-# Warm the embedding model and role-embeddings cache once, at process start,
-# rather than lazily on the first live request. Without this, the first user
-# to trigger semantic search on a freshly started container pays for loading
-# the ONNX model AND fetching the embeddings table from BigQuery inside their
-# own request — on top of the two LLM calls the semantic-search stage already
-# makes, that's often enough to blow through the request timeout. Wrapped in
-# try/except (rather than left to crash worker boot) so a transient BigQuery
-# hiccup at startup doesn't take the whole container down; get_embedding_model()
-# / get_role_embeddings() still work lazily on first use if this fails or is
-# skipped (e.g. when main.py is imported without real credentials, such as in
-# a test).
-try:
-    get_embedding_model()
-    get_role_embeddings()
-except Exception:
-    logger.exception("Startup warm-up of semantic search failed; will load lazily on first request instead")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
