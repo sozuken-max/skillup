@@ -84,6 +84,12 @@ ROLE_EMBEDDINGS_TABLE = os.environ.get(
     "ROLE_EMBEDDINGS_TABLE", "skillup-506706.databricks_mcf_jobs.mcf_role_embeddings"
 )
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
+# Must match the cache_dir the Dockerfile pre-downloads the model weights into
+# at build time (see get_embedding_model() below) — otherwise the first
+# semantic-search request on a fresh container fetches ~80MB from Hugging
+# Face over the network inside the request itself, which is slow enough to
+# blow through the request timeout on its own.
+EMBEDDING_CACHE_DIR = os.environ.get("EMBEDDING_CACHE_DIR", "/app/model_cache")
 EMBEDDING_DIMS = 384
 SEMANTIC_TOP_K = 5
 
@@ -110,13 +116,15 @@ def get_openai_client():
 
 
 def get_embedding_model():
-    """Lazily loads the ONNX-runtime embedding model. Imported inside the
-    function, not at module level, so a cold start that never needs semantic
-    search doesn't pay for loading it."""
+    """Loads the ONNX-runtime embedding model from the local cache the
+    Dockerfile pre-populated at build time (see EMBEDDING_CACHE_DIR) — no
+    network call at request time. Import is inside the function rather than
+    at module level purely so a process that never needs semantic search
+    doesn't pay for importing fastembed."""
     global _embedding_model
     if _embedding_model is None:
         from fastembed import TextEmbedding
-        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
+        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, cache_dir=EMBEDDING_CACHE_DIR)
     return _embedding_model
 
 
@@ -566,6 +574,23 @@ def status():
     # against /healthz can never succeed regardless of what this app does.
     return jsonify({"status": "ok"})
 
+
+# Warm the embedding model and role-embeddings cache once, at process start,
+# rather than lazily on the first live request. Without this, the first user
+# to trigger semantic search on a freshly started container pays for loading
+# the ONNX model AND fetching the embeddings table from BigQuery inside their
+# own request — on top of the two LLM calls the semantic-search stage already
+# makes, that's often enough to blow through the request timeout. Wrapped in
+# try/except (rather than left to crash worker boot) so a transient BigQuery
+# hiccup at startup doesn't take the whole container down; get_embedding_model()
+# / get_role_embeddings() still work lazily on first use if this fails or is
+# skipped (e.g. when main.py is imported without real credentials, such as in
+# a test).
+try:
+    get_embedding_model()
+    get_role_embeddings()
+except Exception:
+    logger.exception("Startup warm-up of semantic search failed; will load lazily on first request instead")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
