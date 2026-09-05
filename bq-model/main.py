@@ -73,10 +73,17 @@ FULL_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}`"
 # same way and rank by cosine similarity (a dot product, since both sides are
 # normalized) instead of relying on the SQL-generation model to guess the
 # dataset's exact wording.
+#
+# Embedding runs through fastembed's ONNX export of this model rather than
+# the original sentence-transformers/PyTorch one. Same weights and tokenizer,
+# so the vectors it produces are compatible with the ones already stored in
+# the table (nearest-neighbour ranking is unaffected by the runtime swap),
+# but without pulling in torch — cuts several hundred MB and a slower import
+# off the image for a single small ONNX model.
 ROLE_EMBEDDINGS_TABLE = os.environ.get(
     "ROLE_EMBEDDINGS_TABLE", "skillup-506706.databricks_mcf_jobs.mcf_role_embeddings"
 )
-EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 EMBEDDING_DIMS = 384
 SEMANTIC_TOP_K = 5
 
@@ -103,13 +110,13 @@ def get_openai_client():
 
 
 def get_embedding_model():
-    """Lazily loads the sentence-transformers model. Imported inside the
+    """Lazily loads the ONNX-runtime embedding model. Imported inside the
     function, not at module level, so a cold start that never needs semantic
-    search doesn't pay for loading torch."""
+    search doesn't pay for loading it."""
     global _embedding_model
     if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        from fastembed import TextEmbedding
+        _embedding_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
     return _embedding_model
 
 
@@ -328,11 +335,12 @@ Does answering this question require finding jobs with a specific job title or r
 
 
 def semantic_search_titles(phrase: str, k: int = SEMANTIC_TOP_K) -> list[dict]:
-    """Embeds `phrase` with the same model/settings used to build the
-    reference table, then returns the k most similar canonical role rows."""
+    """Embeds `phrase` with the same model weights used to build the
+    reference table (fastembed returns L2-normalized vectors already), then
+    returns the k most similar canonical role rows."""
     meta, matrix = get_role_embeddings()
-    query_vector = get_embedding_model().encode(phrase, normalize_embeddings=True, convert_to_numpy=True)
-    return top_k_similar(query_vector, matrix, meta, k=k)
+    query_vector = next(iter(get_embedding_model().embed([phrase])))
+    return top_k_similar(np.asarray(query_vector, dtype=np.float32), matrix, meta, k=k)
 
 
 def rationalize_semantic_matches(question: str, extracted_title: str, candidates: list[dict], model: str = OPENAI_MODEL) -> list[str]:
