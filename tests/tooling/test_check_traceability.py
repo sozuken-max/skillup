@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -131,3 +132,78 @@ def test_pr_must_name_requirement_when_app_changes(
     title: str, branch: str, files: list[str], ok: bool
 ) -> None:
     assert (ct.check_pr(title, branch, files) == []) is ok
+
+
+def test_more_malformed_cases(tmp_path: Path) -> None:
+    (tmp_path / "REQ-003-nofm.md").write_text("no front matter\n")
+    (tmp_path / "REQ-004-empty.md").write_text("---\nid: REQ-004\nstatus: approved\n---\nnone\n")
+    (tmp_path / "REQ-005-dup.md").write_text(
+        "---\nid: REQ-005\nstatus: draft\n---\n- **AC-1**: a\n- **AC-1**: b\n"
+    )
+    (tmp_path / "REQ-005-again.md").write_text("---\nid: REQ-005\nstatus: draft\n---\n")
+    _, errors = load(tmp_path)
+    assert any("missing YAML front matter" in e for e in errors)
+    assert any("has no acceptance criteria" in e for e in errors)
+    assert any("duplicate AC-1" in e for e in errors)
+    assert any("REQ-005 is already used" in e for e in errors)
+
+
+def test_load_results(tmp_path: Path) -> None:
+    assert ct.load_results(None) == {}
+    assert ct.load_results(tmp_path / "missing.json") == {}
+    path = tmp_path / "r.json"
+    path.write_text('{"REQ-001.AC-1": [["t::a", "passed"]]}')
+    assert ct.load_results(path) == {"REQ-001.AC-1": [("t::a", "passed")]}
+
+
+@pytest.fixture
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A throwaway git repo laid out like this one, with ct pointed at it."""
+    for sub in ("docs/requirements", "tests", "evals/datasets"):
+        (tmp_path / sub).mkdir(parents=True)
+    monkeypatch.setattr(ct, "ROOT", tmp_path)
+    monkeypatch.setattr(ct, "REQ_DIR", tmp_path / "docs/requirements")
+    monkeypatch.setattr(ct, "TEST_DIR", tmp_path / "tests")
+    monkeypatch.setattr(ct, "EVAL_DIR", tmp_path / "evals/datasets")
+    monkeypatch.setattr(ct, "REPORT", tmp_path / "reports/traceability.md")
+    git(tmp_path, "init", "-q", "-b", "main")
+    return tmp_path
+
+
+def git(cwd: Path, *args: str) -> None:
+    subprocess.run(  # noqa: S603
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],  # noqa: S607
+        cwd=cwd,
+        check=True,
+    )
+
+
+def test_main_end_to_end(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_req(repo / "docs/requirements")
+    marker = "@pytest.mark." + "req"
+    (repo / "tests/test_a.py").write_text(f'{marker}("REQ-001.AC-1")\n')
+    (repo / "evals/datasets/s.jsonl").write_text('{"req": "REQ-001.AC-2"}\n')
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "base")
+    summary = repo / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    assert ct.main([]) == 0
+    assert "| REQ-001.AC-1 | tests/test_a.py | ok |" in summary.read_text()
+
+    # Change AC-1's wording without touching its test.
+    req = repo / "docs/requirements/REQ-001-example.md"
+    req.write_text(req.read_text().replace("Returns 200.", "Returns 201."))
+    git(repo, "commit", "-qam", "change")
+    assert ct.main(["--base", "HEAD~1", "--pr-title", "REQ-001: change"]) == 1
+    assert "REQ-001.AC-1 changed, but none of its tests did" in ct.REPORT.read_text()
+
+    # Updating the test in the same change satisfies the rule.
+    (repo / "tests/test_a.py").write_text(f'{marker}("REQ-001.AC-1")\n# 201\n')
+    git(repo, "commit", "-qam", "test")
+    assert ct.main(["--base", "HEAD~2", "--pr-title", "REQ-001: change"]) == 0
+
+
+def test_new_requirement_has_no_base(repo: Path) -> None:
+    git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    path = write_req(repo / "docs/requirements")
+    assert ct.base_criteria("HEAD", path) is None

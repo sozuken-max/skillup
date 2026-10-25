@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts import check_cost_guardrails as cg
 
 GOOD_TF = """
@@ -49,3 +51,9 @@ def test_deploy_flags(tmp_path: Path) -> None:
     deploy.write_text("flags: --cpu=1\n")
     assert len(cg.check_deploy(deploy)) == 2
     assert cg.check_deploy(tmp_path / "missing.yml") == []
+
+
+def test_main_reports_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert cg.main() == 0
+    monkeypatch.setattr(cg, "INFRA", tf(tmp_path, "min_instance_count = 2\n"))
+    assert cg.main() == 1

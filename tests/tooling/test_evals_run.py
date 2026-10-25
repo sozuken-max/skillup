@@ -48,3 +48,48 @@ def test_prompt_changes_invalidate_the_cache(evals_dir: Path) -> None:
 def test_no_suites_is_not_an_error(evals_dir: Path) -> None:
     (evals_dir / "suites" / "demo.py").unlink()
     assert run.main([]) == 0
+
+
+def test_main_applies_thresholds(evals_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run, "CACHE", evals_dir / ".cache" / "scores.json")
+    thresholds = evals_dir / "thresholds.yaml"
+    monkeypatch.setattr(run, "THRESHOLDS", thresholds)
+    score = {"value": 1.0}
+
+    def load_scorer(suite: str) -> run.Scorer:
+        del suite
+        return lambda case: score["value"]
+
+    monkeypatch.setattr(run, "load_scorer", load_scorer)
+
+    thresholds.write_text("{}\n")
+    assert run.main(["demo"]) == 1  # no threshold for the suite
+
+    thresholds.write_text("demo: 0.9\n")
+    assert run.main(["demo"]) == 0
+    assert (evals_dir / ".cache" / "scores.json").exists()
+
+    # A changed suite is re-scored, and a score under the threshold fails.
+    score["value"] = 0.5
+    (evals_dir / "suites" / "demo.py").write_text("# changed\n")
+    assert run.main([]) == 1
+
+
+def test_load_scorer_imports_suite_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class Module:
+        @staticmethod
+        def score(case: dict[str, Any]) -> float:
+            del case
+            return 1.0
+
+    def import_module(name: str) -> Module:
+        calls.append(name)
+        return Module()
+
+    monkeypatch.setattr(
+        run, "importlib", type("M", (), {"import_module": staticmethod(import_module)})
+    )
+    assert run.load_scorer("demo")({}) == 1.0
+    assert calls == ["evals.suites.demo"]

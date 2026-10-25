@@ -38,6 +38,10 @@ def load_cases(suite: str) -> list[dict[str, Any]]:
     return [cast(dict[str, Any], json.loads(line)) for line in lines if line.strip()]
 
 
+def load_scorer(suite: str) -> Scorer:
+    return importlib.import_module(f"evals.suites.{suite}").score
+
+
 def fingerprint(suite: str) -> str:
     """Hash of everything that can change a suite's scores, other than the cases."""
     digest = hashlib.sha256((SUITES / f"{suite}.py").read_bytes())
@@ -77,8 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{suite}: no threshold in thresholds.yaml", file=sys.stderr)
             failed = True
             continue
-        module = importlib.import_module(f"evals.suites.{suite}")
-        mean = run_suite(suite, module.score, load_cases(suite), cache)
+        mean = run_suite(suite, load_scorer(suite), load_cases(suite), cache)
         ok = mean >= thresholds[suite]
         failed |= not ok
         print(f"{suite}: {mean:.3f} (threshold {thresholds[suite]:.3f}) {'ok' if ok else 'FAIL'}")
