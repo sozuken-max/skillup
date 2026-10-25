@@ -2,4 +2,4 @@
 
 Fresh start.
 
-`archive/bq-model` holds the code behind the live Cloud Run `bq-model` service, kept for reference.
+`bq-model/` is the live Cloud Run service. Its deploy depends on this path, so leave it where it is.
