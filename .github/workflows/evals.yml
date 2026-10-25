@@ -1,0 +1,41 @@
+name: Evals
+
+# Evals call the real OpenAI API (capped at $5/month), so they only run on request:
+# add the "run-evals" label to a PR, or start this workflow by hand.
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: Space-separated suites to run (empty = all)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'run-evals')
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Restore score cache
+        uses: actions/cache@v6
+        with:
+          path: evals/.cache
+          key: evals-${{ github.sha }}
+          restore-keys: evals-
+      - name: Run evals
+        env:
+          SUITES: ${{ inputs.suites }}
+        run: uv run python -m evals.run $SUITES

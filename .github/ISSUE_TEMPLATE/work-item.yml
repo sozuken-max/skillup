@@ -1,0 +1,33 @@
+name: Work item
+description: A piece of work against a requirement. The assignee holds the lock.
+title: "REQ-NNN: "
+labels: ["work-item"]
+body:
+  - type: input
+    id: req
+    attributes:
+      label: Requirement
+      description: Link to docs/requirements/REQ-NNN-*.md. No REQ yet? Run /new-requirement first, or choose "Idea" below.
+      placeholder: docs/requirements/REQ-007-skill-gap-report.md
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Implement a requirement
+        - Idea (needs a requirement)
+        - Bug
+        - Chore / tooling
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Context, links, constraints. Don't copy the acceptance criteria here; the REQ file is the source of truth.
+  - type: markdown
+    attributes:
+      value: |
+        **How this issue is used:** assign yourself before starting (that is the lock), work on
+        branch `req-NNN/<slug>`, and post a handoff comment (Done / Next / Open questions / Blockers)
+        at the end of every session.

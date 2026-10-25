@@ -1,0 +1,12 @@
+# Default: the owner reviews everything until teammates are added.
+# Add teammates per area as they join, e.g.  /app/modules/jobs/  @alice
+*                   @sozuken-max
+
+# Rules, automation, infra and schema always need the owner.
+/CLAUDE.md          @sozuken-max
+/.claude/           @sozuken-max
+/.github/           @sozuken-max
+/infra/             @sozuken-max
+/migrations/        @sozuken-max
+/docs/adr/          @sozuken-max
+/bq-model/          @sozuken-max

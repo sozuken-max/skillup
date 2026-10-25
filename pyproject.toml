@@ -1,0 +1,50 @@
+[project]
+name = "skillup"
+version = "0.0.0"
+description = "SkillUp career portal backend"
+requires-python = ">=3.13,<3.14"
+# Runtime dependencies are added with the first requirement that needs them (see ADR-0001).
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "diff-cover>=10.6",
+    "pip-audit>=2.10",
+    "pyright>=1.1.414",
+    "pytest>=9.1",
+    "pytest-cov>=7.1",
+    "pyyaml>=6.0.3",
+    "ruff>=0.17",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["bq-model"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "PT", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pyright]
+include = ["scripts", "evals", "tests", ".claude/hooks"]
+exclude = ["bq-model", "**/.venv"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["scripts", "evals"]
+branch = true
+
+[tool.coverage.report]
+skip_empty = true

@@ -1,0 +1,130 @@
+name: Deploy
+
+# main -> staging automatically -> prod after a required reviewer approves the "prod"
+# environment (Settings -> Environments -> prod -> Required reviewers).
+# Does nothing until the app exists (a Dockerfile at the repo root). Never deploys bq-model/.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "migrations/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  REGION: ${{ vars.GCP_REGION }}
+  IMAGE: ${{ vars.GCP_ARTIFACT_REPO }}/api:${{ github.sha }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_app: ${{ steps.check.outputs.has_app }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: check
+        run: echo "has_app=$([ -f Dockerfile ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  staging:
+    needs: detect
+    if: needs.detect.outputs.has_app == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+
+      - name: Build and push image
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Migrate staging database
+        if: hashFiles('migrations/env.py') != ''
+        run: |
+          uv sync --locked --no-dev
+          DATABASE_URL="$(gcloud secrets versions access latest --secret database-url-staging)" \
+            uv run alembic upgrade head
+
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: skillup-api-staging
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}
+          env_vars: ENVIRONMENT=staging
+          secrets: |
+            DATABASE_URL=database-url-staging:latest
+            OPENAI_API_KEY=openai-api-key:latest
+          # Free at idle (ADR-0007): scale to zero, request-based billing, capped instances.
+          flags: >-
+            --min-instances=0 --max-instances=2 --cpu=1 --memory=512Mi
+            --service-account=${{ vars.GCP_RUNTIME_SA }} --allow-unauthenticated
+
+      - name: Smoke test
+        run: curl --fail --retry 5 --retry-delay 3 --retry-all-errors "${{ steps.deploy.outputs.url }}/healthz"
+
+  prod:
+    needs: staging
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+
+      - name: Migrate prod database
+        if: hashFiles('migrations/env.py') != ''
+        run: |
+          uv sync --locked --no-dev
+          DATABASE_URL="$(gcloud secrets versions access latest --secret database-url-prod)" \
+            uv run alembic upgrade head
+
+      # Same image that passed staging; no rebuild.
+      - id: deploy
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          service: skillup-api-prod
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE }}
+          env_vars: ENVIRONMENT=prod
+          secrets: |
+            DATABASE_URL=database-url-prod:latest
+            OPENAI_API_KEY=openai-api-key:latest
+          flags: >-
+            --min-instances=0 --max-instances=3 --cpu=1 --memory=512Mi
+            --service-account=${{ vars.GCP_RUNTIME_SA }} --allow-unauthenticated
+
+      - name: Smoke test
+        run: curl --fail --retry 5 --retry-delay 3 --retry-all-errors "${{ steps.deploy.outputs.url }}/healthz"

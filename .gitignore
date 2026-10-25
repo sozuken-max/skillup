@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+reports/
+evals/.cache/
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+infra/.terraform/
+infra/*.tfstate*
+infra/terraform.tfvars
