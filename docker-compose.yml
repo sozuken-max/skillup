@@ -1,0 +1,19 @@
+# Local development database: Postgres with pgvector, the same as Neon in staging and prod.
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: skillup
+      POSTGRES_PASSWORD: skillup
+      POSTGRES_DB: skillup
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skillup"]
+      interval: 2s
+      retries: 15
+
+volumes:
+  pgdata:

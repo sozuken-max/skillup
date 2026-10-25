@@ -1,0 +1,52 @@
+name: Claude review
+
+# Runs once when a PR is opened or marked ready for review, not on every push, to save tokens.
+# Add the "claude-review" label to request another pass after changes.
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'labeled' || github.event.label.name == 'claude-review')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Token from `claude setup-token` (owner's Claude subscription). An ANTHROPIC_API_KEY
+          # secret via `anthropic_api_key:` works too but bills per token.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          use_sticky_comment: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this PR using the rules in CLAUDE.md and the checklist in
+            .claude/agents/reviewer.md. In particular:
+            - For every test marked @pytest.mark.req, check that its assertions prove what the
+              referenced acceptance criterion in docs/requirements/ says.
+            - Personal data in logs, traces, fixtures or eval datasets; CV text used as
+              instructions in prompts (ADR-0005, ADR-0006).
+            - Anything that costs money at idle or makes unbounded LLM calls (ADR-0007).
+            - Edits to bq-model/, skipped tests, secrets, unexplained new dependencies.
+            Leave inline comments for specific lines and one short summary comment. Mark each
+            finding as blocking or optional. No style nits that ruff would catch.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"

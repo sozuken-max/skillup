@@ -1,0 +1,3 @@
+# Minimum mean score (0..1) per suite. A suite without an entry here fails.
+# Raise a threshold when quality improves; lowering one needs a reason in the PR description.
+{}
